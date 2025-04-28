@@ -43,3 +43,4 @@ migrations/
 
 # FastAPI specific (optional)
 *.db
+temp_videos/
