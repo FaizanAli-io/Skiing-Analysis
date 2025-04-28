@@ -1,11 +1,10 @@
 from sqlalchemy import create_engine
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
-
+import os
+load_dotenv()
 # Update with your MySQL credentials
-SQLALCHEMY_DATABASE_URL = (
-    "postgresql+psycopg2://neondb_owner:npg_rOInV0TUa9HF@ep-sweet-bush-a4q9wya6-pooler.us-east-1.aws.neon.tech/neondb?sslmode=require"
-)
+SQLALCHEMY_DATABASE_URL = os.getenv("POSTGRE_SQL")
 
 engine = create_engine(SQLALCHEMY_DATABASE_URL)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
