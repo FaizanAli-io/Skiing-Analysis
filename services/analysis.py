@@ -39,9 +39,9 @@ def analyze_video(video_path: str):
     image_centre = frame_width//2
 
     # Define the codec and create a VideoWriter object
-    output_path = "output_video.mp4"
-    fourcc = cv2.VideoWriter_fourcc(*'mp4v')  # MP4 codec format
-    out = cv2.VideoWriter(output_path, fourcc, fps, (TARGET_WIDTH, TARGET_HEIGHT))
+    # output_path = "output_video.mp4"
+    # fourcc = cv2.VideoWriter_fourcc(*'mp4v')  # MP4 codec format
+    # out = cv2.VideoWriter(output_path, fourcc, fps, (TARGET_WIDTH, TARGET_HEIGHT))
 
     if not cap.isOpened():
         raise ValueError("Error: Could not open video file.")
@@ -382,7 +382,7 @@ def analyze_video(video_path: str):
         #             break  # Resume when any key is pressedk
         frame_count += 1
     cap.release()
-    out.release()
+    # out.release()
     print(f"Duration: {duration}")
     print(f"Total Turns: {turns}")
     if turns == 0:
