@@ -36,8 +36,6 @@ class PersonScores(BaseModel):
     scores: List[Score]
 
 
-from fastapi import Form
-
 @router.post("/app", response_model=List[PersonScores])
 def get_app_data(
     token: str = Form(...),
