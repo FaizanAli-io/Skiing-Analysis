@@ -47,3 +47,19 @@ temp_videos/
 
 # Ignore YOLOv8 model
 yolov8n.pt
+
+# Ignore all MP4 and MOV video files
+*.mp4
+*.MP4
+*.mov
+*.MOV
+
+uploads/*.mp4
+uploads/*.MP4
+uploads/*.mov
+uploads/*.MOV
+
+outputs/*.mp4
+outputs/*.MP4
+outputs/*.mov
+outputs/*.MOV
