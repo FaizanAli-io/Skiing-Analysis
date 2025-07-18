@@ -44,3 +44,6 @@ migrations/
 # FastAPI specific (optional)
 *.db
 temp_videos/
+
+# Ignore YOLOv8 model
+yolov8n.pt
