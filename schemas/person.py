@@ -11,3 +11,8 @@ class PersonOut(PersonCreate):
     class Config:
         from_attributes = True
         
+
+
+class PersonIDName(BaseModel):
+    id: int
+    name: str

@@ -34,3 +34,5 @@ def delete(person_id: int, db: Session = Depends(get_db)):
     if not deleted:
         raise HTTPException(status_code=404, detail="Person not found")
     return {"message": "Deleted successfully"}
+
+

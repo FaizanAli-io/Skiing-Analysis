@@ -16,6 +16,9 @@ def create_person(db: Session, person: PersonCreate):
 def get_person(db: Session, person_id: int):
     return db.query(Person).filter(Person.id == person_id).first()
 
+def get_all_persons_id_name(db: Session):
+    return db.query(Person.id, Person.name).all()
+
 def get_all_persons(db: Session, skip: int = 0, limit: int = 10):
     return db.query(Person).offset(skip).limit(limit).all()
 

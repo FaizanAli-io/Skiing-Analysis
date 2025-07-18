@@ -2,7 +2,7 @@ from pydantic import BaseModel
 from typing import Optional
 from datetime import datetime
 class VideoAnalysisCreate(BaseModel):
-    person_id: int
+    person_id: Optional[int] = None
     video_name: str
     video_link: Optional[str]
     pressure_score: float
