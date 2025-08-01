@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session
 from database import get_db
 import crud.person as crud
 import schemas.person as schemas
-
+from typing import List
 router = APIRouter(prefix="/persons", tags=["Persons"])
 
 @router.post("/", response_model=schemas.PersonOut)
@@ -17,7 +17,7 @@ def read(person_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Person not found")
     return db_person
 
-@router.get("/", response_model=list[schemas.PersonOut])
+@router.get("/", response_model=List[schemas.PersonOut])
 def read_all(skip: int = 0, limit: int = 10, db: Session = Depends(get_db)):
     return crud.get_all_persons(db, skip, limit)
 
