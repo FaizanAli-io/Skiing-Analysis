@@ -25,7 +25,7 @@ def read(video_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Video not found")
     return db_video
 
-@router.get("/", response_model=list[schemas.VideoAnalysisOut])
+@router.get("/", response_model=List[schemas.VideoAnalysisOut])
 def read_all(skip: int = 0, limit: int = 10, db: Session = Depends(get_db)):
     return crud.get_all_videos(db, skip, limit)
 
