@@ -15,7 +15,7 @@ from services.new_analysis import analyze_video
 from routes import video_analysis, person, app_routes
 import threading
 from services.file_watcher import start_watching
-from typing import Optional
+from typing import Optional, List
 
 
 # Create DB tables
@@ -61,7 +61,7 @@ def format_persons(persons):
 persons = format_persons(persons)
 
 # Custom endpoint: Get ID and Name of all persons
-@app.get("/all", response_model=list[PersonIDName])
+@app.get("/all", response_model=List[PersonIDName])
 def get_all_persons_id_name(db: Session = Depends(get_db)):
     return person_crud.get_all_persons_id_name(db)
 
