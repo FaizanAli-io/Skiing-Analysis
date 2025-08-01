@@ -821,7 +821,7 @@ def analyze_video(video_path: str):
     finally:
       cap.release()
       out.release()
-      cv2.destroyAllWindows()
+    #   cv2.destroyAllWindows()
       print(f"Duration: {duration}")
       print(f"Total Turns: {turns}")
       import time
