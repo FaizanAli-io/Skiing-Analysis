@@ -834,7 +834,7 @@ def analyze_video(video_path: str):
       if os.path.exists(output_path):
           file_size = os.path.getsize(output_path)
           print(f"Video saved: {output_path} ({file_size} bytes)")
-          slow_down_video_2x(output_path)
+        #   slow_down_video_2x(output_path)
       else:
           print(f"Warning: Video file not created at {output_path}")
 
