@@ -6,6 +6,16 @@ TARGET_WIDTH = 1280
 TARGET_HEIGHT = 720
 
 def rotate_frame(frame, angle):
+    """
+    Rotate frame by specified angle.
+    
+    Args:
+        frame: Input video frame
+        angle: Rotation angle (0, 90, -90, 180)
+    
+    Returns:
+        Rotated frame
+    """
     if angle == 90:
         return cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
     elif angle == -90:
@@ -464,16 +474,18 @@ def check_tilting(frame, speed, hipVertAngle, speed_threshold=18.0, angle_thresh
         return 0
 
 
-def detect_ski_lines(frame, ski_boxes, flag):
+def detect_ski_lines(frame, ski_boxes, flag, rotation_angle=0):
     """
     Detects and draws ski lines from bounding boxes on the frame.
 
     Args:
         frame (np.ndarray): The image frame.
         ski_boxes (list of tuples): List of bounding boxes [(x1, y1, x2, y2), ...]
+        flag (bool): Flag indicating if skis were detected
+        rotation_angle (int): The rotation angle applied to the video (0, 90, -90, 180)
 
     Returns:
-        list of tuples: List of detected ski lines [(x1, y1, x2, y2), ...]
+        tuple: (list of ski lines, flag)
     """
     ski_lines = []
 
@@ -485,6 +497,8 @@ def detect_ski_lines(frame, ski_boxes, flag):
         y_max = max([box[3] for box in ski_boxes])
 
         # Split the bounding box into two halves (left and right ski)
+        # Skis are always side by side (left foot, right foot) regardless of rotation
+        # because rotation is already applied to the frame before ski detection
         mid_x = (x_min + x_max) // 2
         ski_boxes = [(x_min, y_min, mid_x, y_max), (mid_x, y_min, x_max, y_max)]
 

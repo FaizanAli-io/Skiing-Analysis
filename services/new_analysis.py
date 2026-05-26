@@ -99,7 +99,7 @@ def create_overlay(frame, metrics, frame_number, TARGET_WIDTH, logo_path=None):
 
         # CLEAN HEADER - No titles, just clean separation
         cv2.rectangle(overlay, (0, 0), (EXTENDED_WIDTH, 60), header_bg_color, -1)
-        cv2.line(overlay, (0, 102), (EXTENDED_WIDTH, 102), border_gray, 2)
+        # cv2.line(overlay, (0, 102), (EXTENDED_WIDTH, 102), border_gray, 2)
 
         # Add clean separator line between video and sidebar
         cv2.line(overlay, (TARGET_WIDTH, 0), (TARGET_WIDTH, frame_height), border_gray, 3)
@@ -110,7 +110,7 @@ def create_overlay(frame, metrics, frame_number, TARGET_WIDTH, logo_path=None):
 
         # 1. LOGO - TOP & CENTERED IN SIDEBAR
         logo_w = 720
-        logo_h = 100
+        logo_h = 150
         logo_x = TARGET_WIDTH + (SIDEBAR_WIDTH - logo_w) // 2  # Centered in 650px sidebar
         logo_y = current_y -80
 
@@ -554,48 +554,68 @@ def analyze_video(video_path: str) -> Dict[str, Any]:
         pressure_speed_score = []
         pressure_angle_score = []
 
-        # Detect optimal rotation angle
-        logger.info("Detecting optimal rotation angle...")
+        # Detect optimal rotation angle - person should be vertical/upright
+        logger.info("Detecting optimal rotation angle using nose-above-feet test...")
         rotation_angles = [0, 90, -90, 180]
-        detected_angle = None
+        detected_angle = 0  # Default: no rotation needed
+        best_score = -999
         
         try:
-            for angle in rotation_angles:
-                logger.debug(f"Testing rotation angle: {angle}°")
-                ret, frame = cap.read()
-                if not ret:
-                    logger.warning("Could not read frame for rotation detection")
-                    break
+            # Skip to middle of video for a cleaner frame
+            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            middle_frame = total_frames // 2
+            cap.set(cv2.CAP_PROP_POS_FRAMES, middle_frame)
+            ret, test_frame = cap.read()
+            
+            if ret:
+                logger.info(f"Testing rotation on middle frame ({middle_frame}/{total_frames}) with shape: {test_frame.shape}")
                 
-                rotated_frame = rotate_frame(frame, angle)
-                resized_frame, new_width, new_height = resize_and_center_frame(rotated_frame, TARGET_WIDTH, TARGET_HEIGHT)
-                image_centre = new_width // 2
+                for angle in rotation_angles:
+                    # Test the SAME frame at different angles
+                    rotated_frame = rotate_frame(test_frame, angle)
+                    resized_frame, new_width, new_height = resize_and_center_frame(rotated_frame, TARGET_WIDTH, TARGET_HEIGHT)
+                    
+                    # Check if person is upright using pose detection
+                    rgb_frame = cv2.cvtColor(resized_frame, cv2.COLOR_BGR2RGB)
+                    pose_results = pose.process(rgb_frame)
+                    
+                    if pose_results.pose_landmarks:
+                        landmarks = pose_results.pose_landmarks.landmark
+                        
+                        # Simple and reliable: nose should be ABOVE feet (smaller y = higher up)
+                        nose_y = landmarks[0].y          # landmark 0 = nose
+                        l_ankle_y = landmarks[27].y      # landmark 27 = left ankle
+                        r_ankle_y = landmarks[28].y      # landmark 28 = right ankle
+                        feet_y = (l_ankle_y + r_ankle_y) / 2
+                        
+                        # CORRECT orientation: nose_y < feet_y (nose is HIGHER = smaller y value)
+                        # Score = how much ABOVE the feet the nose is
+                        score = feet_y - nose_y
+                        
+                        logger.info(f"Angle {angle:4d}°: nose_y={nose_y:.3f}, feet_y={feet_y:.3f}, score={score:.3f}")
+                        
+                        if score > best_score:
+                            best_score = score
+                            detected_angle = angle
+                            logger.info(f"  ✓ Better orientation (nose is above feet)")
+                    else:
+                        logger.debug(f"Angle {angle}°: No pose landmarks detected")
+            else:
+                logger.warning("Could not read test frame, defaulting to 0° rotation")
                 
-                results = model.track(resized_frame, persist=True)
-                detected_people, ski_boxes, detected_ids = detect_people_and_skis_from_results(results, scores, history)
-                
-                if detected_ids:
-                    detected_angle = angle
-                    logger.info(f"People detected at {angle}° rotation")
-                    break
         except Exception as e:
             logger.error(f"Error during rotation detection: {e}")
             detected_angle = 0
-        finally:
-            cap.release()
-
-        if detected_angle is None:
-            logger.warning("No people detected in any orientation, using 0° rotation")
-            detected_angle = 0
-        else:
-            logger.info(f"Using rotation angle: {detected_angle}°")
-
-        # Reopen video for main processing
+        
+        # Close test capture and open fresh for main processing
+        cap.release()
         cap = cv2.VideoCapture(video_path)
+        
+        logger.info(f"✓ Using rotation angle: {detected_angle}° (nose-above-feet score: {best_score:.3f})")
         frame_count = 0
         processed_frames = 0
 
-        logger.info("Starting main video processing loop...")
+        logger.info(f"Starting main video processing loop with rotation angle: {detected_angle}°")
         
         while cap.isOpened():
             ret, frame = cap.read()
@@ -603,12 +623,24 @@ def analyze_video(video_path: str) -> Dict[str, Any]:
                 logger.info("End of video reached or error reading frame")
                 break
 
+            # Log original frame dimensions on first frame
+            if frame_count == 0:
+                logger.info(f"Original frame shape before rotation: {frame.shape}")
+
+            # STEP 1: Rotate frame FIRST to make person upright (before any detection)
             if detected_angle != 0:
                 frame = rotate_frame(frame, detected_angle)
+                if frame_count == 0:
+                    logger.info(f"Frame shape after {detected_angle}° rotation: {frame.shape}")
             
+            # STEP 2: Resize and center the rotated frame
             frame, new_width, new_height = resize_and_center_frame(frame, TARGET_WIDTH, TARGET_HEIGHT)
             image_centre = new_width // 2
             
+            if frame_count == 0:
+                logger.info(f"Frame shape after resize: {frame.shape} (width={new_width}, height={new_height})")
+            
+            # STEP 3: Skip frames if needed (for performance)
             if frame_count % frame_skip != 0:
                 frame_count += 1
                 continue
@@ -752,7 +784,7 @@ def analyze_video(video_path: str) -> Dict[str, Any]:
                 if ski_boxes:
                     logger.debug(f"Processing {len(ski_boxes)} ski boxes")
                     try:
-                        ski_lines, flag = detect_ski_lines(frame, ski_boxes, flag)
+                        ski_lines, flag = detect_ski_lines(frame, ski_boxes, flag, detected_angle)
                         skiAngle = None
 
                         if len(ski_lines) == 2:
