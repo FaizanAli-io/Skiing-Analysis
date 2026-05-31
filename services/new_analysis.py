@@ -120,7 +120,12 @@ def analyze_video(video_path: str, display_mode: str = "coach", overlay_renderer
         output_path = get_unique_output_path(outputs_dir, base_name, display_mode, variant=output_variant)
         logger.info(f"Output video path: {output_path}")
 
-        output_size = (TARGET_WIDTH + 720, TARGET_HEIGHT) if overlay_renderer in {"opencv", "premium"} else (TARGET_WIDTH, TARGET_HEIGHT)
+        if overlay_renderer == "opencv":
+            output_size = (TARGET_WIDTH + 720, TARGET_HEIGHT)
+        elif overlay_renderer == "premium":
+            output_size = (TARGET_WIDTH + 460, TARGET_HEIGHT)
+        else:
+            output_size = (TARGET_WIDTH, TARGET_HEIGHT)
         out = cv2.VideoWriter(output_path, fourcc, output_fps, output_size)
 
         if not out.isOpened():
@@ -531,7 +536,7 @@ def analyze_video(video_path: str, display_mode: str = "coach", overlay_renderer
                     # Write original frame if overlay fails
                     try:
                         if overlay_renderer in {"opencv", "premium"}:
-                            SIDEBAR_WIDTH = 720
+                            SIDEBAR_WIDTH = 460 if overlay_renderer == "premium" else 720
                             EXTENDED_WIDTH = TARGET_WIDTH + SIDEBAR_WIDTH
                             frame_height = frame.shape[0]
                             extended_frame = np.zeros((frame_height, EXTENDED_WIDTH, 3), dtype=np.uint8)

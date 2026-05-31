@@ -13,6 +13,8 @@ except ImportError:
     ImageFont = None
 
 logger = logging.getLogger(__name__)
+
+
 def draw_logo_placeholder(overlay, x, y, w, h, border_color, text_color):
     """Draw a placeholder when logo is not available"""
     logger.debug(f"Drawing logo placeholder at position ({x}, {y}) with dimensions {w}x{h}")
@@ -23,6 +25,7 @@ def draw_logo_placeholder(overlay, x, y, w, h, border_color, text_color):
         logger.debug("Logo placeholder drawn successfully")
     except Exception as e:
         logger.error(f"Error drawing logo placeholder: {e}")
+
 
 def _score_tier(score):
     if score < 100:
@@ -76,21 +79,21 @@ def _latest_metric_value(metrics, key, precision=1):
 
 def _blueiq_level_label(score):
     levels = [
-        (60, 80, "Beginner - Level 1"),
-        (81, 100, "Beginner - Level 2"),
-        (101, 120, "Intermediate - Level 3"),
-        (121, 140, "Intermediate - Level 4"),
-        (141, 160, "Intermediate - Level 5"),
-        (161, 180, "Intermediate - Level 6"),
-        (181, 200, "Intermediate - Level 7"),
-        (201, 220, "Expert - Level 8"),
-        (221, 240, "Expert - Level 9"),
+        (60, 80, "Beginner \u2022 Level 1"),
+        (81, 100, "Beginner \u2022 Level 2"),
+        (101, 120, "Intermediate \u2022 Level 3"),
+        (121, 140, "Intermediate \u2022 Level 4"),
+        (141, 160, "Intermediate \u2022 Level 5"),
+        (161, 180, "Intermediate \u2022 Level 6"),
+        (181, 200, "Intermediate \u2022 Level 7"),
+        (201, 220, "Expert \u2022 Level 8"),
+        (221, 240, "Expert \u2022 Level 9"),
     ]
     score = _clamp_score(score)
     for low, high, label in levels:
         if low <= score <= high:
             return label
-    return "Expert - Level 9"
+    return "Expert \u2022 Level 9"
 
 
 def get_unique_output_path(outputs_dir, base_name, display_mode, extension=".mp4", variant=None):
@@ -128,181 +131,296 @@ def write_react_overlay_page(output_path, result_data, display_mode):
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Bluerun Analysis</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,300&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
   <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
   <style>
+    *, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
     :root {{
-      color-scheme: light;
-      --bg: #eef3f6;
-      --panel: #ffffff;
-      --text: #202830;
-      --muted: #7a838d;
-      --line: #d7dee4;
-      --blue: #2799d6;
-      --needs: #d6604a;
-      --developing: #f49d2a;
-      --strong: #4faf79;
-      --excellent: #282828;
+      --navy-950: #060a14;
+      --navy-900: #0a0e1a;
+      --navy-800: #0d1525;
+      --navy-700: #111c30;
+      --navy-600: #162038;
+      --navy-500: #1e2d4a;
+      --card-bg: rgba(255,255,255,0.04);
+      --card-border: rgba(255,255,255,0.08);
+      --card-border-hover: rgba(255,255,255,0.14);
+      --blue-400: #6aafff;
+      --blue-300: #93c5fd;
+      --blue-500: #3b82f6;
+      --green-400: #4ade80;
+      --green-500: #22c55e;
+      --green-600: #16a34a;
+      --amber-400: #fbbf24;
+      --amber-500: #f59e0b;
+      --amber-600: #d97706;
+      --red-400: #f87171;
+      --red-500: #ef4444;
+      --red-600: #dc2626;
+      --text-primary: rgba(255,255,255,0.92);
+      --text-secondary: rgba(255,255,255,0.5);
+      --text-tertiary: rgba(255,255,255,0.28);
+      --font-sans: 'DM Sans', system-ui, sans-serif;
+      --font-mono: 'DM Mono', monospace;
+      --radius-sm: 8px;
+      --radius-md: 12px;
+      --radius-lg: 16px;
+      --radius-xl: 20px;
+      --radius-pill: 999px;
     }}
-    * {{ box-sizing: border-box; }}
+    html, body {{ height: 100%; }}
     body {{
-      margin: 0;
-      min-height: 100vh;
+      font-family: var(--font-sans);
+      background: #060a14;
+      color: var(--text-primary);
       display: grid;
       place-items: center;
-      background: #111;
-      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      color: var(--text);
+      min-height: 100vh;
+      -webkit-font-smoothing: antialiased;
     }}
     .shell {{
-      width: min(1480px, 100vw);
-      background: var(--bg);
+      width: min(1600px, 100vw);
       display: grid;
       grid-template-columns: minmax(0, 1fr) 420px;
-      box-shadow: 0 24px 80px rgba(0, 0, 0, .35);
+      min-height: 100vh;
+      background: var(--navy-900);
     }}
-    video {{
+    .video-pane {{
+      position: relative;
+      background: #000;
+      display: flex;
+      align-items: center;
+    }}
+    .video-pane video {{
       width: 100%;
       height: 100%;
       display: block;
-      background: #000;
       object-fit: contain;
     }}
-    aside {{
-      min-height: 100%;
-      padding: 24px;
-      border-left: 1px solid var(--line);
-    }}
-    .brand {{
+    .sidebar {{
+      background: linear-gradient(175deg, var(--navy-900) 0%, var(--navy-800) 55%, #0a1020 100%);
+      border-left: 1px solid rgba(255,255,255,0.06);
+      padding: 28px 24px 32px;
       display: flex;
-      align-items: center;
-      justify-content: space-between;
-      margin-bottom: 22px;
-    }}
-    .logo {{
-      font-size: 34px;
-      font-weight: 800;
-      letter-spacing: 0;
-      color: #8ecae2;
-    }}
-    .badge {{
-      padding: 7px 12px;
-      border-radius: 999px;
-      font-size: 11px;
-      font-weight: 800;
-      letter-spacing: .08em;
-      color: {("#aab0cc" if display_mode == "coach" else "#1a5fa0")};
-      background: {("#1e1e2e" if display_mode == "coach" else "#e8f4ff")};
-    }}
-    .card {{
-      background: var(--panel);
-      border: 1px solid var(--line);
-      border-radius: 18px;
-      padding: 22px;
-      margin-bottom: 16px;
-    }}
-    .eyebrow {{
-      color: var(--muted);
-      font-size: 12px;
-      font-weight: 800;
-      letter-spacing: .14em;
-      text-transform: uppercase;
-      margin-bottom: 14px;
-    }}
-    .hero-score {{
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      padding: 18px;
-      border-radius: 16px;
-      background: linear-gradient(135deg, #f8fbfd, #edf4f8);
-      margin-bottom: 18px;
-    }}
-    .hero-score b {{
-      display: block;
-      color: var(--blue);
-      font-size: 18px;
-      margin-bottom: 4px;
-    }}
-    .hero-score span {{
-      color: var(--muted);
-      font-size: 12px;
-      font-weight: 700;
-    }}
-    .score-number {{
-      font-size: 48px;
-      line-height: 1;
-      font-weight: 900;
-      color: var(--score-color);
-    }}
-    .metric {{
-      margin-top: 16px;
-    }}
-    .metric-top {{
-      display: flex;
-      align-items: baseline;
-      justify-content: space-between;
-      gap: 12px;
-      margin-bottom: 8px;
-    }}
-    .metric-name {{
-      font-size: 15px;
-      font-weight: 800;
-    }}
-    .metric-value {{
-      font-size: 15px;
-      font-weight: 900;
-      color: var(--metric-color);
-    }}
-    .bar {{
-      height: 12px;
-      overflow: hidden;
-      border-radius: 999px;
-      background: #e5ebef;
+      flex-direction: column;
+      gap: 0;
+      overflow-y: auto;
       position: relative;
     }}
-    .fill {{
-      width: var(--pct);
-      height: 100%;
-      border-radius: 999px;
-      background: var(--metric-color);
+    .sidebar::before {{
+      content: '';
+      position: absolute;
+      top: -100px; left: -100px;
+      width: 360px; height: 360px;
+      background: radial-gradient(circle, rgba(106,175,255,0.05) 0%, transparent 70%);
+      pointer-events: none;
     }}
-    .tier {{
-      margin-top: 6px;
-      color: var(--muted);
-      font-size: 11px;
-      font-weight: 800;
-      text-transform: uppercase;
+    .logo-row {{
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 26px;
     }}
-    .tiers {{
-      display: grid;
-      grid-template-columns: repeat(4, 1fr);
-      gap: 4px;
-      margin-bottom: 12px;
-    }}
-    .tiers div {{
-      color: white;
-      border-radius: 7px;
-      padding: 7px 6px;
+    .logo-svg {{ height: 32px; width: auto; }}
+    .coach-badge {{
       font-size: 10px;
-      font-weight: 900;
-      text-align: center;
+      font-weight: 600;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--blue-400);
+      background: rgba(106,175,255,0.10);
+      border: 1px solid rgba(106,175,255,0.22);
+      padding: 5px 12px;
+      border-radius: var(--radius-pill);
     }}
-    .rows {{
-      display: grid;
-      gap: 12px;
+    .athlete-badge {{
+      font-size: 10px;
+      font-weight: 600;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--green-400);
+      background: rgba(74,222,128,0.10);
+      border: 1px solid rgba(74,222,128,0.22);
+      padding: 5px 12px;
+      border-radius: var(--radius-pill);
     }}
-    .row {{
+    .section-header {{
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 14px;
+    }}
+    .section-icon {{
+      width: 26px; height: 26px;
+      background: rgba(106,175,255,0.09);
+      border: 1px solid rgba(106,175,255,0.18);
+      border-radius: 7px;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 13px;
+      flex-shrink: 0;
+    }}
+    .section-title {{
+      font-size: 10px;
+      font-weight: 600;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--text-secondary);
+    }}
+    .iq-card {{
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: var(--radius-lg);
+      padding: 18px 20px;
+      margin-bottom: 14px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }}
+    .iq-label {{
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--blue-400);
+      margin-bottom: 3px;
+    }}
+    .iq-sublabel {{
+      font-size: 11px;
+      color: rgba(255,255,255,0.55);
+      font-weight: 400;
+    }}
+    .iq-score-block {{ text-align: right; }}
+    .iq-score {{
+      font-family: var(--font-mono);
+      font-size: 52px;
+      font-weight: 500;
+      color: #ffffff;
+      letter-spacing: -1px;
+      line-height: 1;
+    }}
+    .iq-tier-label {{
+      font-size: 9px;
+      font-weight: 700;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      text-align: right;
+      margin-top: 3px;
+    }}
+    .tier-excellent {{ color: var(--blue-400); }}
+    .tier-strong {{ color: var(--green-400); }}
+    .tier-developing {{ color: var(--amber-400); }}
+    .tier-needs {{ color: var(--red-400); }}
+    .level-pills {{
+      display: flex;
+      gap: 4px;
+      margin-bottom: 22px;
+    }}
+    .pill {{
+      height: 4px;
+      border-radius: var(--radius-pill);
+      flex: 1;
+    }}
+    .pill-needs {{ background: var(--red-500); opacity: 0.5; }}
+    .pill-developing {{ background: var(--amber-500); opacity: 0.5; }}
+    .pill-strong {{ background: var(--green-500); opacity: 0.5; }}
+    .pill-excellent {{ background: var(--blue-400); flex: 2; }}
+    .metrics-stack {{
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      margin-bottom: 22px;
+    }}
+    .metric-card {{
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: var(--radius-md);
+      padding: 14px 16px 14px 19px;
+      position: relative;
+      overflow: hidden;
+      transition: border-color 0.2s;
+    }}
+    .metric-card:hover {{ border-color: var(--card-border-hover); }}
+    .metric-card::before {{
+      content: '';
+      position: absolute;
+      left: 0; top: 0; bottom: 0;
+      width: 3px;
+      border-radius: 3px 0 0 3px;
+    }}
+    .mc-excellent::before {{ background: var(--blue-400); }}
+    .mc-strong::before {{ background: var(--green-500); }}
+    .mc-developing::before {{ background: var(--amber-500); }}
+    .mc-needs::before {{ background: var(--red-500); }}
+    .metric-top {{
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 10px;
+    }}
+    .metric-name {{
+      font-size: 13px;
+      font-weight: 500;
+      color: rgba(255,255,255,0.8);
+    }}
+    .metric-right {{
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }}
+    .metric-score {{
+      font-family: var(--font-mono);
+      font-size: 19px;
+      font-weight: 500;
+      color: #ffffff;
+    }}
+    .metric-badge {{
+      font-size: 9px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      padding: 3px 8px;
+      border-radius: var(--radius-pill);
+    }}
+    .mb-excellent {{ background: rgba(106,175,255,0.10); color: var(--blue-400); border: 1px solid rgba(106,175,255,0.22); }}
+    .mb-strong {{ background: rgba(34,197,94,0.10); color: var(--green-400); border: 1px solid rgba(34,197,94,0.22); }}
+    .mb-developing {{ background: rgba(245,158,11,0.10); color: var(--amber-400); border: 1px solid rgba(245,158,11,0.22); }}
+    .mb-needs {{ background: rgba(239,68,68,0.10); color: var(--red-400); border: 1px solid rgba(239,68,68,0.22); }}
+    .progress-track {{
+      height: 5px;
+      background: rgba(255,255,255,0.07);
+      border-radius: var(--radius-pill);
+      overflow: hidden;
+    }}
+    .progress-fill {{
+      height: 100%;
+      border-radius: var(--radius-pill);
+      transition: width 0.8s cubic-bezier(0.16, 1, 0.3, 1);
+    }}
+    .pf-excellent {{ background: linear-gradient(90deg, var(--blue-500), var(--blue-400)); }}
+    .pf-strong    {{ background: linear-gradient(90deg, var(--green-600), var(--green-500)); }}
+    .pf-developing {{ background: linear-gradient(90deg, var(--amber-600), var(--amber-500)); }}
+    .pf-needs     {{ background: linear-gradient(90deg, var(--red-600), var(--red-500)); }}
+    .divider {{
+      height: 1px;
+      background: rgba(255,255,255,0.06);
+      margin: 18px 0;
+    }}
+    .run-stats {{ display: flex; flex-direction: column; gap: 10px; margin-top: 14px; }}
+    .run-stat-row {{
       display: flex;
       justify-content: space-between;
-      gap: 24px;
-      font-size: 14px;
-      font-weight: 750;
+      align-items: center;
+      padding: 10px 14px;
+      background: rgba(255,255,255,0.03);
+      border: 1px solid rgba(255,255,255,0.06);
+      border-radius: var(--radius-sm);
     }}
-    .row span:last-child {{
-      color: var(--blue);
-      font-weight: 900;
-    }}
+    .run-stat-label {{ font-size: 13px; color: var(--text-secondary); font-weight: 400; }}
+    .run-stat-value {{ font-family: var(--font-mono); font-size: 14px; color: var(--blue-400); font-weight: 500; }}
+    .sidebar::-webkit-scrollbar {{ width: 4px; }}
+    .sidebar::-webkit-scrollbar-track {{ background: transparent; }}
+    .sidebar::-webkit-scrollbar-thumb {{ background: rgba(255,255,255,0.1); border-radius: 2px; }}
   </style>
 </head>
 <body>
@@ -310,54 +428,102 @@ def write_react_overlay_page(output_path, result_data, display_mode):
   <script>
     const data = {json.dumps(payload)};
     const e = React.createElement;
-    const tierColor = score => score < 100 ? "var(--needs)" : score < 150 ? "var(--developing)" : score < 200 ? "var(--strong)" : "var(--excellent)";
-    const tierLabel = score => score < 100 ? "Needs Work" : score < 150 ? "Developing" : score < 200 ? "Strong" : "Excellent";
-    const pct = score => Math.max(0, Math.min(100, ((score - 60) / 180) * 100)) + "%";
-    function Metric({{ name, score }}) {{
-      const color = tierColor(score);
-      return e("div", {{ className: "metric", style: {{ "--metric-color": color }} }},
-        e("div", {{ className: "metric-top" }},
-          e("div", {{ className: "metric-name" }}, name),
-          e("div", {{ className: "metric-value" }}, Math.round(score))
+    function tierKey(score) {{
+      if (score >= 200) return 'excellent';
+      if (score >= 150) return 'strong';
+      if (score >= 100) return 'developing';
+      return 'needs';
+    }}
+    function tierLabel(score) {{
+      return {{ excellent: 'Excellent', strong: 'Strong', developing: 'Developing', needs: 'Needs Work' }}[tierKey(score)];
+    }}
+    function pct(score) {{
+      return Math.max(0, Math.min(100, ((score - 60) / 180) * 100));
+    }}
+    function LogoSVG() {{
+      return e('svg', {{ className:'logo-svg', viewBox:'0 0 148 36', fill:'none', xmlns:'http://www.w3.org/2000/svg' }},
+        e('polygon', {{ points:'14,2 22,2 14,10 6,10', fill:'#6aafff', opacity:'0.9' }}),
+        e('polygon', {{ points:'6,10 14,10 6,18 0,12', fill:'#6aafff', opacity:'0.65' }}),
+        e('polygon', {{ points:'10,18 18,18 26,26 18,26', fill:'#6aafff', opacity:'0.9' }}),
+        e('polygon', {{ points:'18,26 26,26 18,34 10,34', fill:'#6aafff', opacity:'0.65' }}),
+        e('text', {{ x:'35', y:'26', fill:'#6aafff', fontSize:'22', fontWeight:'500',
+          fontFamily:"'DM Sans', sans-serif", letterSpacing:'-0.3' }}, 'bluerun')
+      );
+    }}
+    function MetricCard({{ name, score }}) {{
+      const tk = tierKey(score);
+      const tl = tierLabel(score);
+      const width = pct(score);
+      return e('div', {{ className: `metric-card mc-${{tk}}` }},
+        e('div', {{ className: 'metric-top' }},
+          e('span', {{ className: 'metric-name' }}, name),
+          e('div', {{ className: 'metric-right' }},
+            e('span', {{ className: 'metric-score' }}, Math.round(score)),
+            e('span', {{ className: `metric-badge mb-${{tk}}` }}, tl)
+          )
         ),
-        e("div", {{ className: "bar" }}, e("div", {{ className: "fill", style: {{ "--pct": pct(score) }} }})),
-        e("div", {{ className: "tier" }}, tierLabel(score))
+        e('div', {{ className: 'progress-track' }},
+          e('div', {{ className: `progress-fill pf-${{tk}}`, style: {{ width: width + '%' }} }})
+        )
       );
     }}
     function App() {{
-      const coach = data.display_mode === "coach";
-      const rows = coach
-        ? [["Turns", data.turns], ["Duration", data.duration.toFixed(1) + " sec"], ["Processed frames", data.processed_frames]]
-        : [["Turns completed", data.turns], ["Duration", data.duration.toFixed(1) + " sec"]];
-      return e("main", {{ className: "shell" }},
-        e("video", {{ src: data.video_src, controls: true, autoPlay: false }}),
-        e("aside", null,
-          e("div", {{ className: "brand" }}, e("div", {{ className: "logo" }}, "bluerun"), e("div", {{ className: "badge" }}, data.display_mode.toUpperCase())),
-          e("section", {{ className: "card" }},
-            e("div", {{ className: "eyebrow" }}, "Performance Profile"),
-            e("div", {{ className: "hero-score", style: {{ "--score-color": tierColor(data.blue_iq) }} }},
-              e("div", null, e("b", null, "BLUE IQ"), e("span", null, data.level_label)),
-              e("div", {{ className: "score-number" }}, Math.round(data.blue_iq))
-            ),
-            e("div", {{ className: "tiers" }},
-              e("div", {{ style: {{ background: "var(--needs)" }} }}, "NEEDS WORK"),
-              e("div", {{ style: {{ background: "var(--developing)" }} }}, "DEVELOPING"),
-              e("div", {{ style: {{ background: "var(--strong)" }} }}, "STRONG"),
-              e("div", {{ style: {{ background: "var(--excellent)" }} }}, "EXCELLENT")
-            ),
-            e(Metric, {{ name: "Pressure", score: data.pressure_score }}),
-            e(Metric, {{ name: "Balance", score: data.balance_score }}),
-            e(Metric, {{ name: "Rotation", score: data.rotation_score }}),
-            e(Metric, {{ name: "Edging", score: data.edging_score }})
+      const coach = data.display_mode === 'coach';
+      const iqTk = tierKey(data.blue_iq);
+      return e('main', {{ className: 'shell' }},
+        e('div', {{ className: 'video-pane' }},
+          e('video', {{ src: data.video_src, controls: true, autoPlay: false }})
+        ),
+        e('aside', {{ className: 'sidebar' }},
+          e('div', {{ className: 'logo-row' }},
+            e(LogoSVG),
+            e('span', {{ className: coach ? 'coach-badge' : 'athlete-badge' }}, data.display_mode.toUpperCase())
           ),
-          e("section", {{ className: "card" }},
-            e("div", {{ className: "eyebrow" }}, coach ? "Live Run Metrics" : "This Run"),
-            e("div", {{ className: "rows" }}, rows.map(row => e("div", {{ className: "row", key: row[0] }}, e("span", null, row[0]), e("span", null, row[1]))))
+          e('div', {{ className: 'section-header' }},
+            e('div', {{ className: 'section-icon' }}, '\ud83c\udfaf'),
+            e('span', {{ className: 'section-title' }}, 'Performance Profile')
+          ),
+          e('div', {{ className: 'iq-card' }},
+            e('div', null,
+              e('div', {{ className: 'iq-label' }}, 'Blue IQ'),
+              e('div', {{ className: 'iq-sublabel' }}, data.level_label)
+            ),
+            e('div', {{ className: 'iq-score-block' }},
+              e('div', {{ className: 'iq-score' }}, Math.round(data.blue_iq)),
+              e('div', {{ className: `iq-tier-label tier-${{iqTk}}` }}, tierLabel(data.blue_iq).toUpperCase())
+            )
+          ),
+          e('div', {{ className: 'level-pills' }},
+            e('div', {{ className: 'pill pill-needs' }}),
+            e('div', {{ className: 'pill pill-developing' }}),
+            e('div', {{ className: 'pill pill-strong' }}),
+            e('div', {{ className: 'pill pill-excellent' }})
+          ),
+          e('div', {{ className: 'metrics-stack' }},
+            e(MetricCard, {{ name: 'Pressure', score: data.pressure_score }}),
+            e(MetricCard, {{ name: 'Balance',  score: data.balance_score }}),
+            e(MetricCard, {{ name: 'Rotation', score: data.rotation_score }}),
+            e(MetricCard, {{ name: 'Edging',   score: data.edging_score }})
+          ),
+          e('div', {{ className: 'divider' }}),
+          e('div', {{ className: 'section-header' }},
+            e('div', {{ className: 'section-icon' }}, '\ud83d\udce1'),
+            e('span', {{ className: 'section-title' }}, coach ? 'Live Run Metrics' : 'This Run')
+          ),
+          e('div', {{ className: 'run-stats' }},
+            e('div', {{ className: 'run-stat-row' }},
+              e('span', {{ className: 'run-stat-label' }}, 'Turns completed'),
+              e('span', {{ className: 'run-stat-value' }}, data.turns)
+            ),
+            e('div', {{ className: 'run-stat-row' }},
+              e('span', {{ className: 'run-stat-label' }}, 'Speed'),
+              e('span', {{ className: 'run-stat-value' }}, (data.speed != null ? (+data.speed).toFixed(1) + ' px/frame' : 'N/A'))
+            )
           )
         )
       );
     }}
-    ReactDOM.createRoot(document.getElementById("root")).render(e(App));
+    ReactDOM.createRoot(document.getElementById('root')).render(e(App));
   </script>
 </body>
 </html>
@@ -375,11 +541,25 @@ def _load_font(size, bold=False):
     if ImageFont is None:
         return None
 
-    candidates = [
-        "C:/Windows/Fonts/arialbd.ttf" if bold else "C:/Windows/Fonts/arial.ttf",
-        "C:/Windows/Fonts/segoeuib.ttf" if bold else "C:/Windows/Fonts/segoeui.ttf",
-        "arialbd.ttf" if bold else "arial.ttf",
-    ]
+    candidates = []
+    if bold:
+        candidates = [
+            "C:/Windows/Fonts/arialbd.ttf",
+            "C:/Windows/Fonts/segoeuib.ttf",
+            "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+            "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf",
+            "arialbd.ttf",
+        ]
+    else:
+        candidates = [
+            "C:/Windows/Fonts/arial.ttf",
+            "C:/Windows/Fonts/segoeui.ttf",
+            "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
+            "arial.ttf",
+        ]
     for path in candidates:
         try:
             return ImageFont.truetype(path, size)
@@ -411,145 +591,332 @@ def _premium_metric_bar(draw, label, score, x, y, width, colors, fonts):
 
 
 def create_premium_overlay(frame, metrics, frame_number, TARGET_WIDTH, logo_path=None, display_mode="coach"):
-    """Render a higher-quality burned-in sidebar using Pillow."""
+    """Render a dark modern burned-in sidebar using Pillow.
+
+    Layout (720px sidebar, 720px frame height):
+      - Logo + badge header
+      - Performance Profile section header
+      - Blue IQ card (score + tier tag right-aligned)
+      - Level pills
+      - Four metric cards (Pressure, Balance, Rotation, Edging)
+        Each: label left | score+tag right | progress bar bottom
+      - Divider
+      - This Run / Live Run Metrics section header
+      - Two stat rows: label left | value right (inline, not stacked)
+    """
     if Image is None:
         raise RuntimeError("Pillow is required for premium overlay rendering")
 
-    SIDEBAR_WIDTH = 720
-    frame_height = frame.shape[0]
-    video_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    video_img = Image.fromarray(video_rgb)
+    sidebar_width = 460
+    frame_height  = frame.shape[0]   # expected 720
+    video_rgb     = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    video_img     = Image.fromarray(video_rgb)
 
-    canvas = Image.new("RGB", (TARGET_WIDTH + SIDEBAR_WIDTH, frame_height), (242, 244, 246))
+    canvas = Image.new("RGB", (TARGET_WIDTH + sidebar_width, frame_height), (10, 14, 26))
     canvas.paste(video_img, (0, 0))
     draw = ImageDraw.Draw(canvas)
 
-    colors = {
-        "bg": (242, 244, 246),
-        "panel": (255, 255, 255),
-        "text": (32, 40, 48),
-        "muted": (117, 127, 136),
-        "muted_dark": (80, 89, 98),
-        "line": (213, 219, 224),
-        "bar_bg": (228, 233, 237),
-        "blue": (39, 153, 214),
-        "coach_bg": (30, 30, 46),
-        "coach_text": (188, 194, 222),
-        "athlete_bg": (232, 244, 255),
-        "athlete_text": (26, 95, 160),
-        "needs": (214, 96, 74),
-        "developing": (244, 157, 42),
-        "strong": (79, 175, 121),
-        "excellent": (42, 42, 42),
+    # ── COLOR PALETTE ────────────────────────────────────────────────────────
+    C = {
+        "bg_top":      (10,  14,  26),
+        "bg_mid":      (13,  21,  37),
+        "bg_bottom":   (10,  16,  32),
+        "card":        (18,  27,  46),
+        "card_soft":   (17,  26,  44),
+        "border":      (42,  54,  80),
+        "text":        (238, 246, 255),
+        "text_soft":   (220, 230, 242),
+        "muted":       (172, 184, 202),
+        "faint":       (130, 144, 166),
+        "track":       (43,  53,  74),
+        "blue":        (106, 175, 255),
+        "green":       (34,  197,  94),
+        "amber":       (245, 158,  11),
+        "red":         (239,  68,  68),
     }
-    fonts = {
-        "brand": _load_font(46, bold=True),
-        "title": _load_font(17, bold=True),
-        "badge": _load_font(13, bold=True),
-        "hero": _load_font(24, bold=True),
-        "hero_score": _load_font(54, bold=True),
-        "small": _load_font(14, bold=True),
-        "metric": _load_font(18, bold=True),
-        "tiny": _load_font(11, bold=True),
-        "row": _load_font(16, bold=True),
+
+    # ── FONTS ────────────────────────────────────────────────────────────────
+    F = {
+        "brand":        _load_font(28, bold=True),
+        "section":      _load_font(10, bold=True),
+        "badge":        _load_font(11, bold=True),
+        "iq_label":     _load_font(17, bold=True),
+        "iq_sublabel":  _load_font(13, bold=False),
+        "iq_score":     _load_font(52, bold=True),
+        "iq_tier":      _load_font(12, bold=True),
+        "metric_name":  _load_font(14, bold=False),
+        "metric_score": _load_font(22, bold=True),
+        "metric_tag":   _load_font(11, bold=True),
+        "tiny":         _load_font(10, bold=True),
+        "stat_label":   _load_font(13, bold=False),
+        "stat_value":   _load_font(15, bold=True),
     }
 
     sidebar_x = TARGET_WIDTH
-    draw.line((sidebar_x, 0, sidebar_x, frame_height), fill=colors["line"], width=1)
 
-    logo_w, logo_h = 420, 72
-    logo_x = sidebar_x + (SIDEBAR_WIDTH - logo_w) // 2
-    logo_y = 20
+    # ── BACKGROUND GRADIENT ──────────────────────────────────────────────────
+    for y_px in range(frame_height):
+        ratio = y_px / max(1, frame_height - 1)
+        if ratio < 0.45:
+            t = ratio / 0.45
+            bg = tuple(int(C["bg_top"][i]*(1-t) + C["bg_mid"][i]*t) for i in range(3))
+        else:
+            t = (ratio - 0.45) / 0.55
+            bg = tuple(int(C["bg_mid"][i]*(1-t) + C["bg_bottom"][i]*t) for i in range(3))
+        draw.line((sidebar_x, y_px, sidebar_x + sidebar_width, y_px), fill=bg)
+
+    # Subtle radial glow behind logo area
+    for radius, shade in ((360, (13,31,58)), (240,(11,26,50)), (140,(10,22,42))):
+        draw.ellipse((sidebar_x, -radius//3, sidebar_x+radius, radius), fill=shade)
+
+    # Left border separator
+    draw.line((sidebar_x, 0, sidebar_x, frame_height), fill=(30, 42, 64), width=1)
+
+    # ── LAYOUT CONSTANTS ─────────────────────────────────────────────────────
+    MARGIN   = 20
+    panel_x  = sidebar_x + MARGIN
+    panel_w  = sidebar_width - MARGIN * 2
+
+    # Fixed column anchors for metric rows
+    LABEL_X        = panel_x + 16
+    TAG_W          = 88
+    TAG_H          = 22
+    TAG_X          = panel_x + panel_w - TAG_W - 10
+    SCORE_RIGHT_X  = TAG_X - 10   # score right-edge
+
+    # ── TIER HELPERS ─────────────────────────────────────────────────────────
+    def _tkey(s):
+        if s >= 200: return "excellent"
+        if s >= 150: return "strong"
+        if s >= 100: return "developing"
+        return "needs"
+
+    def _tcolor(s):
+        return {"excellent": C["blue"], "strong": C["green"],
+                "developing": C["amber"], "needs": C["red"]}[_tkey(s)]
+
+    def _tlabel(s):
+        return {"excellent": "Excellent", "strong": "Strong",
+                "developing": "Developing", "needs": "Needs Work"}[_tkey(s)]
+
+    # Compute Blue IQ
+    blue_iq = (
+        metrics["Blue_pressure_final"] + metrics["Blue_rotation_final"] +
+        metrics["Blue_edging_final"]   + metrics["Blue_balance_final"]
+    ) / 4
+
+    # ── SECTION: LOGO + BADGE ────────────────────────────────────────────────
+    y = 16
+
+    # Logo — diamond mark then wordmark
     logo_loaded = False
     if logo_path and os.path.exists(logo_path):
         try:
-            logo = Image.open(logo_path).convert("RGBA").resize((logo_w, logo_h))
-            canvas.paste(logo, (logo_x, logo_y), logo)
+            logo = Image.open(logo_path).convert("RGBA")
+            logo.thumbnail((200, 36), Image.LANCZOS)
+            canvas.paste(logo, (panel_x, y + 2), logo)
             logo_loaded = True
-        except Exception as e:
-            logger.error(f"Premium logo load error: {e}")
+        except Exception as exc:
+            logger.error(f"Premium logo load error: {exc}")
+
     if not logo_loaded:
-        draw.text((logo_x + 10, logo_y + 10), "bluerun", fill=(142, 202, 226), font=fonts["brand"])
+        mx, my = panel_x, y + 2
+        # Diamond icon (4 rhombus facets)
+        for idx, poly in enumerate([
+            [(mx+12,my+0), (mx+20,my+0), (mx+12,my+8), (mx+4,my+8)],
+            [(mx+4,my+8),  (mx+12,my+8), (mx+4,my+16), (mx+0,my+10)],
+            [(mx+8,my+16), (mx+16,my+16),(mx+24,my+24),(mx+16,my+24)],
+            [(mx+16,my+24),(mx+24,my+24),(mx+16,my+32),(mx+8,my+32)],
+        ]):
+            draw.polygon(poly, fill=C["blue"] if idx % 2 == 0 else (82, 148, 222))
+        draw.text((panel_x + 32, y + 3), "bluerun", fill=C["blue"], font=F["brand"])
 
+    # Athlete / Coach badge (top-right)
     badge_label = "COACH" if display_mode == "coach" else "ATHLETE"
-    badge_fill = colors["coach_bg"] if display_mode == "coach" else colors["athlete_bg"]
-    badge_text = colors["coach_text"] if display_mode == "coach" else colors["athlete_text"]
-    badge_x = sidebar_x + SIDEBAR_WIDTH - 146
-    badge_y = 38
-    draw.rounded_rectangle((badge_x, badge_y, badge_x + 116, badge_y + 31), radius=16, fill=badge_fill)
-    draw.text((badge_x + 18, badge_y + 8), badge_label, fill=badge_text, font=fonts["badge"])
+    badge_color = C["blue"] if display_mode == "coach" else C["green"]
+    BW, BH = 88, 26
+    bx = sidebar_x + sidebar_width - MARGIN - BW
+    by = y + 5
+    draw.rounded_rectangle((bx, by, bx+BW, by+BH), radius=13, fill=(18,32,56), outline=badge_color, width=1)
+    btw = draw.textlength(badge_label, font=F["badge"])
+    draw.text((bx + (BW - btw) / 2, by + 6), badge_label, fill=badge_color, font=F["badge"])
 
-    panel_x = sidebar_x + 28
-    panel_w = SIDEBAR_WIDTH - 56
-    panel_y = 108
-    panel_h = 450
-    draw.rounded_rectangle((panel_x, panel_y, panel_x + panel_w, panel_y + panel_h), radius=18, fill=colors["panel"], outline=colors["line"], width=1)
-    draw.text((panel_x + 24, panel_y + 24), "PERFORMANCE PROFILE", fill=colors["muted"], font=fonts["title"])
+    y += 48   # breathing room after logo row
 
-    blue_iq = (
-        metrics["Blue_pressure_final"] +
-        metrics["Blue_rotation_final"] +
-        metrics["Blue_edging_final"] +
-        metrics["Blue_balance_final"]
-    ) / 4
-    overall_tier, overall_color_bgr = _score_tier(blue_iq)
-    overall_color = _rgb(overall_color_bgr)
+    # ── SECTION HEADER HELPER ────────────────────────────────────────────────
+    def section_header(sy, title, live=False):
+        # Small circle icon
+        draw.rounded_rectangle((panel_x, sy, panel_x+22, sy+22),
+                                radius=6, fill=(18,32,56), outline=(38,58,86), width=1)
+        draw.ellipse((panel_x+6, sy+6, panel_x+16, sy+16), outline=C["blue"], width=2)
+        draw.text((panel_x + 28, sy + 5), title, fill=C["muted"], font=F["section"])
+        if live:
+            dx = panel_x + panel_w - 50
+            draw.ellipse((dx, sy+7, dx+7, sy+14), fill=C["red"])
+            draw.text((dx+11, sy+5), "LIVE", fill=C["red"], font=F["tiny"])
+        return sy + 28
 
-    chip_y = panel_y + 58
-    draw.rounded_rectangle((panel_x + 20, chip_y, panel_x + panel_w - 20, chip_y + 78), radius=16, fill=(248, 251, 253))
-    draw.text((panel_x + 42, chip_y + 17), "BLUE IQ", fill=colors["blue"], font=fonts["hero"])
-    draw.text((panel_x + 42, chip_y + 48), _blueiq_level_label(blue_iq), fill=colors["muted_dark"], font=fonts["small"])
-    draw.text((panel_x + panel_w - 166, chip_y + 10), f"{blue_iq:.0f}", fill=overall_color, font=fonts["hero_score"])
-    draw.text((panel_x + panel_w - 158, chip_y + 58), overall_tier.upper(), fill=colors["muted_dark"], font=fonts["tiny"])
+    # ── PERFORMANCE PROFILE ──────────────────────────────────────────────────
+    y = section_header(y, "PERFORMANCE PROFILE")
 
-    tier_y = chip_y + 96
-    tier_items = [
-        ("NEEDS WORK", colors["needs"]),
-        ("DEVELOPING", colors["developing"]),
-        ("STRONG", colors["strong"]),
-        ("EXCELLENT", colors["excellent"]),
-    ]
-    tier_w = (panel_w - 48) // 4
-    for idx, (label, fill) in enumerate(tier_items):
-        x1 = panel_x + 24 + idx * tier_w
-        x2 = panel_x + 24 + (idx + 1) * tier_w - 6
-        draw.rounded_rectangle((x1, tier_y, x2, tier_y + 27), radius=7, fill=fill)
-        draw.text((x1 + 9, tier_y + 8), label, fill=(255, 255, 255), font=fonts["tiny"])
+    # Blue IQ card
+    IQ_H = 74
+    draw.rounded_rectangle((panel_x, y, panel_x+panel_w, y+IQ_H),
+                            radius=14, fill=C["card"], outline=C["border"], width=1)
+    draw.text((panel_x+16, y+10), "Blue IQ",               fill=C["blue"],  font=F["iq_label"])
+    draw.text((panel_x+16, y+36), _blueiq_level_label(blue_iq), fill=C["muted"], font=F["iq_sublabel"])
 
-    row_y = tier_y + 44
-    for label, score in [
+    score_str = f"{blue_iq:.0f}"
+    sw = draw.textlength(score_str, font=F["iq_score"])
+    tier_txt  = _tlabel(blue_iq).upper()
+    tier_col  = _tcolor(blue_iq)
+
+    iq_tag_w = max(90, int(draw.textlength(tier_txt, font=F["iq_tier"]) + 22))
+    iq_tag_h = 24
+    iq_tag_x = panel_x + panel_w - iq_tag_w - 12
+    iq_tag_y = y + 28
+
+    score_right = iq_tag_x - 12
+    draw.text((score_right - sw, y + 4), score_str, fill=C["text"], font=F["iq_score"])
+    draw.rounded_rectangle((iq_tag_x, iq_tag_y, iq_tag_x+iq_tag_w, iq_tag_y+iq_tag_h),
+                            radius=11, fill=(20,36,58), outline=tier_col, width=1)
+    tw = draw.textlength(tier_txt, font=F["iq_tier"])
+    draw.text((iq_tag_x + (iq_tag_w - tw)/2, iq_tag_y + 5), tier_txt, fill=tier_col, font=F["iq_tier"])
+
+    y += IQ_H + 8
+
+    # Level pills (4 colored bars)
+    pill_gap  = 5
+    punit     = (panel_w - pill_gap * 3) // 5
+    px_cur    = panel_x
+    for pcol, flex in [(C["red"],1),(C["amber"],1),(C["green"],1),(C["blue"],2)]:
+        pw = punit * flex + pill_gap * (flex - 1)
+        draw.rounded_rectangle((px_cur, y, px_cur+pw, y+4), radius=2, fill=pcol)
+        px_cur += pw + pill_gap
+    y += 14
+
+    # ── METRIC CARDS ─────────────────────────────────────────────────────────
+    # Budget: allocate card height so everything fits top-to-bottom with safe margin.
+    # Fixed costs below metric cards:
+    #   divider_y_step (6) + divider_line (1) + divider_h (18) = ~25
+    #   section header = 28
+    #   2 stat cards + 1 gap
+    CARD_GAP  = 6
+    STAT_H    = 46
+    STAT_GAP  = 7
+    DIVIDER_H = 24   # total y advance for divider block
+    SEC_HDR_H = 28   # total y advance for section_header()
+    BOTTOM    = 16
+
+    fixed_below = DIVIDER_H + SEC_HDR_H + 2 * STAT_H + STAT_GAP + BOTTOM
+    available   = frame_height - y - fixed_below
+    CARD_H      = max(50, (available - 3 * CARD_GAP) // 4)  # 3 gaps between 4 cards
+
+    metrics_to_draw = [
         ("Pressure", metrics["Blue_pressure_final"]),
-        ("Balance", metrics["Blue_balance_final"]),
+        ("Balance",  metrics["Blue_balance_final"]),
         ("Rotation", metrics["Blue_rotation_final"]),
-        ("Edging", metrics["Blue_edging_final"]),
-    ]:
-        _premium_metric_bar(draw, label, score, panel_x + 24, row_y, panel_w - 48, colors, fonts)
-        row_y += 58
+        ("Edging",   metrics["Blue_edging_final"]),
+    ]
 
-    live_y = panel_y + panel_h + 14
-    live_h = 154 if display_mode == "coach" else 94
-    draw.rounded_rectangle((panel_x, live_y, panel_x + panel_w, live_y + live_h), radius=18, fill=colors["panel"], outline=colors["line"], width=1)
-    section_title = "LIVE RUN METRICS" if display_mode == "coach" else "THIS RUN"
-    draw.text((panel_x + 24, live_y + 22), section_title, fill=colors["muted"], font=fonts["title"])
+    def draw_metric_card(cy, label, score):
+        col = _tcolor(score)
+        # Card background + border
+        draw.rounded_rectangle((panel_x, cy, panel_x+panel_w, cy+CARD_H),
+                                radius=12, fill=C["card"], outline=C["border"], width=1)
+        # Left accent strip
+        draw.rounded_rectangle((panel_x, cy, panel_x+3, cy+CARD_H), radius=3, fill=col)
+
+        # Vertical center for text row
+        text_y = cy + (CARD_H - 22) // 2
+
+        # Label (left)
+        draw.text((LABEL_X, text_y + 4), label, fill=C["text_soft"], font=F["metric_name"])
+
+        # Score (right-anchored before tag)
+        ss   = f"{score:.0f}"
+        sc_w = draw.textlength(ss, font=F["metric_score"])
+        draw.text((SCORE_RIGHT_X - sc_w, text_y), ss, fill=C["text"], font=F["metric_score"])
+
+        # Tag pill (right-anchored)
+        tag_text = _tlabel(score)
+        tag_tw   = draw.textlength(tag_text, font=F["metric_tag"])
+        tag_pad  = (TAG_W - tag_tw) / 2
+        tag_y    = cy + (CARD_H - TAG_H) // 2
+        draw.rounded_rectangle((TAG_X, tag_y, TAG_X+TAG_W, tag_y+TAG_H),
+                                radius=10, fill=(20,36,58), outline=col, width=1)
+        draw.text((TAG_X + tag_pad, tag_y + 4), tag_text, fill=col, font=F["metric_tag"])
+
+        # Progress bar (near bottom of card)
+        bar_bottom_pad = 10
+        bar_y  = cy + CARD_H - bar_bottom_pad - 5
+        bar_x  = panel_x + 12
+        bar_w  = panel_w - 24
+        fw     = int(bar_w * (_clamp_score(score) - 60) / 180)
+        draw.rounded_rectangle((bar_x, bar_y, bar_x+bar_w, bar_y+5), radius=3, fill=C["track"])
+        if fw > 0:
+            draw.rounded_rectangle((bar_x, bar_y, bar_x+fw, bar_y+5), radius=3, fill=col)
+
+    for i, (label, score) in enumerate(metrics_to_draw):
+        draw_metric_card(y, label, score)
+        y += CARD_H + (CARD_GAP if i < len(metrics_to_draw)-1 else 0)
+
+    # ── DIVIDER ──────────────────────────────────────────────────────────────
+    y += 6
+    draw.line((panel_x, y, panel_x+panel_w, y), fill=(38, 50, 72), width=1)
+    y += DIVIDER_H - 6
+
+    # ── THIS RUN / LIVE RUN METRICS ──────────────────────────────────────────
+    sec_title = "LIVE RUN METRICS" if display_mode == "coach" else "THIS RUN"
+    y = section_header(y, sec_title, live=(display_mode == "coach"))
 
     if display_mode == "coach":
-        live_rows = [
-            ("Ski separation", f"{_latest_metric_value(metrics, 'ski_angle')} deg"),
-            ("Edge angle", f"{_latest_metric_value(metrics, 'ski_angle2')} deg"),
-            ("Hip angle", f"{_latest_metric_value(metrics, 'hip_angle')} deg"),
-            ("Bend angle", f"{_latest_metric_value(metrics, 'bend_angle')} deg"),
-            ("Turns", _latest_metric_value(metrics, "turns", precision=0)),
+        # Coach: 2×2 live metric grid
+        live_items = [
+            ("Ski Separation", f"{_latest_metric_value(metrics,'ski_angle')}\u00b0"),
+            ("Edge Angle",     f"{_latest_metric_value(metrics,'ski_angle2')}\u00b0"),
+            ("Hip Angle",      f"{_latest_metric_value(metrics,'hip_angle')}\u00b0"),
+            ("Bend Angle",     f"{_latest_metric_value(metrics,'bend_angle')}\u00b0"),
         ]
+        LCOL_W  = (panel_w - 8) // 2
+        LCARD_H = STAT_H
+        LGAP    = 8
+        for idx, (lbl, val) in enumerate(live_items):
+            col_idx = idx % 2
+            row_idx = idx // 2
+            lx = panel_x + col_idx * (LCOL_W + LGAP)
+            ly = y + row_idx * (LCARD_H + LGAP)
+            if ly + LCARD_H > frame_height - BOTTOM:
+                break
+            draw.rounded_rectangle((lx, ly, lx+LCOL_W, ly+LCARD_H),
+                                    radius=10, fill=C["card_soft"], outline=(38,50,72), width=1)
+            draw.text((lx+12, ly+8),  lbl, fill=C["faint"], font=F["stat_label"])
+            draw.text((lx+12, ly+26), val, fill=C["blue"],  font=F["stat_value"])
     else:
-        live_rows = [
-            ("Turns completed", _latest_metric_value(metrics, "turns", precision=0)),
+        # Athlete mode: two full-width stat rows (label left | value right, inline)
+        turns_val = _latest_metric_value(metrics, "turns", precision=0)
+        speed_raw = _latest_metric_value(metrics, "speed/lateral movement", precision=1)
+        speed_str = f"{speed_raw} px/frame" if speed_raw != "N/A" else "N/A"
+
+        stat_items = [
+            ("Turns completed", turns_val),
+            ("Speed",           speed_str),
         ]
 
-    metric_y = live_y + 57
-    for label, value in live_rows:
-        draw.text((panel_x + 32, metric_y), label, fill=colors["text"], font=fonts["row"])
-        draw.text((panel_x + panel_w - 170, metric_y), str(value), fill=colors["blue"], font=fonts["row"])
-        metric_y += 24
+        for idx, (lbl, val) in enumerate(stat_items):
+            sy = y + idx * (STAT_H + STAT_GAP)
+            if sy + STAT_H > frame_height - BOTTOM:
+                break
+            # Card background
+            draw.rounded_rectangle((panel_x, sy, panel_x+panel_w, sy+STAT_H),
+                                    radius=12, fill=C["card_soft"], outline=(38,50,72), width=1)
+            # Label — left side, vertically centered
+            draw.text((panel_x+16, sy + (STAT_H - 14) // 2), lbl,
+                      fill=C["muted"], font=F["stat_label"])
+            # Value — right side, vertically centered, bold blue
+            vw = draw.textlength(val, font=F["stat_value"])
+            draw.text((panel_x + panel_w - 14 - vw, sy + (STAT_H - 16) // 2), val,
+                      fill=C["blue"], font=F["stat_value"])
 
     return cv2.cvtColor(np.array(canvas), cv2.COLOR_RGB2BGR)
 
@@ -701,7 +1068,3 @@ def create_overlay(frame, metrics, frame_number, TARGET_WIDTH, logo_path=None, d
         except Exception:
             logger.critical("Failed to create fallback frame, returning original")
             return frame
-
-
-
-
