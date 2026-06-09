@@ -14,6 +14,26 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+MAX_BLUE_SCORE = 240
+LEVEL_COUNT = 9
+SCORE_BANDS = (
+    {"key": "emerging", "label": "Emerging", "min": 60, "max": 129},
+    {"key": "developing", "label": "Developing", "min": 130, "max": 169},
+    {"key": "proficient", "label": "Proficient", "min": 170, "max": 199},
+    {"key": "excellent", "label": "Excellent", "min": 200, "max": 240},
+)
+BLUE_IQ_LEVELS = (
+    {"level": 1, "label": "Beginner \u2022 Level 1", "min": 60, "max": 80},
+    {"level": 2, "label": "Beginner \u2022 Level 2", "min": 81, "max": 100},
+    {"level": 3, "label": "Intermediate \u2022 Level 3", "min": 101, "max": 120},
+    {"level": 4, "label": "Intermediate \u2022 Level 4", "min": 121, "max": 140},
+    {"level": 5, "label": "Intermediate \u2022 Level 5", "min": 141, "max": 160},
+    {"level": 6, "label": "Intermediate \u2022 Level 6", "min": 161, "max": 180},
+    {"level": 7, "label": "Intermediate \u2022 Level 7", "min": 181, "max": 200},
+    {"level": 8, "label": "Expert \u2022 Level 8", "min": 201, "max": 220},
+    {"level": 9, "label": "Expert \u2022 Level 9", "min": 221, "max": 240},
+)
+
 
 def draw_logo_placeholder(overlay, x, y, w, h, border_color, text_color):
     """Draw a placeholder when logo is not available"""
@@ -28,17 +48,30 @@ def draw_logo_placeholder(overlay, x, y, w, h, border_color, text_color):
 
 
 def _score_tier(score):
-    if score < 100:
-        return "Needs Work", (74, 96, 214)
-    if score < 150:
-        return "Developing", (42, 157, 244)
-    if score < 200:
-        return "Strong", (108, 166, 32)
-    return "Excellent", (42, 42, 42)
+    band = _score_band(score)
+    color_map = {
+        "emerging": (74, 96, 214),
+        "developing": (42, 157, 244),
+        "proficient": (108, 166, 32),
+        "excellent": (42, 42, 42),
+    }
+    return band["label"], color_map[band["key"]]
+
+
+def _score_band(score):
+    score = int(round(_clamp_score(score)))
+    for band in SCORE_BANDS:
+        if band["min"] <= score <= band["max"]:
+            return band
+    return SCORE_BANDS[0] if score < SCORE_BANDS[0]["min"] else SCORE_BANDS[-1]
 
 
 def _clamp_score(score, min_score=60, max_score=240):
     return max(min_score, min(max_score, float(score or 0)))
+
+
+def _score_fill_ratio(score):
+    return max(0.0, min(1.0, float(score or 0) / MAX_BLUE_SCORE))
 
 
 def _draw_metric_bar(canvas, label, score, x, y, width, colors, highlight=False):
@@ -48,8 +81,7 @@ def _draw_metric_bar(canvas, label, score, x, y, width, colors, highlight=False)
     bar_y = y + 16
     bar_w = width - 265
     bar_h = 18
-    score_ratio = (score - 60) / 180
-    fill_w = int(bar_w * score_ratio)
+    fill_w = int(bar_w * _score_fill_ratio(score))
 
     label_color = colors["accent"] if highlight else colors["text"]
     cv2.putText(canvas, label, (x, y + 31), cv2.FONT_HERSHEY_DUPLEX, 0.68, label_color, 2)
@@ -57,7 +89,7 @@ def _draw_metric_bar(canvas, label, score, x, y, width, colors, highlight=False)
     cv2.rectangle(canvas, (bar_x, bar_y), (bar_x + fill_w, bar_y + bar_h), tier_color, -1)
 
     for boundary in (100, 150, 200):
-        marker_x = bar_x + int(bar_w * ((boundary - 60) / 180))
+        marker_x = bar_x + int(bar_w * (boundary / MAX_BLUE_SCORE))
         cv2.line(canvas, (marker_x, bar_y), (marker_x, bar_y + bar_h), colors["panel"], 2)
 
     cv2.circle(canvas, (bar_x + fill_w, bar_y + bar_h // 2), 5, colors["panel"], -1)
@@ -78,22 +110,15 @@ def _latest_metric_value(metrics, key, precision=1):
 
 
 def _blueiq_level_label(score):
-    levels = [
-        (60, 80, "Beginner \u2022 Level 1"),
-        (81, 100, "Beginner \u2022 Level 2"),
-        (101, 120, "Intermediate \u2022 Level 3"),
-        (121, 140, "Intermediate \u2022 Level 4"),
-        (141, 160, "Intermediate \u2022 Level 5"),
-        (161, 180, "Intermediate \u2022 Level 6"),
-        (181, 200, "Intermediate \u2022 Level 7"),
-        (201, 220, "Expert \u2022 Level 8"),
-        (221, 240, "Expert \u2022 Level 9"),
-    ]
-    score = _clamp_score(score)
-    for low, high, label in levels:
-        if low <= score <= high:
-            return label
-    return "Expert \u2022 Level 9"
+    return _blueiq_level_info(score)["label"]
+
+
+def _blueiq_level_info(score):
+    score = int(round(_clamp_score(score)))
+    for level in BLUE_IQ_LEVELS:
+        if level["min"] <= score <= level["max"]:
+            return level
+    return BLUE_IQ_LEVELS[0] if score < BLUE_IQ_LEVELS[0]["min"] else BLUE_IQ_LEVELS[-1]
 
 
 def get_unique_output_path(outputs_dir, base_name, display_mode, extension=".mp4", variant=None):
@@ -643,9 +668,11 @@ def create_premium_overlay(frame, metrics, frame_number, TARGET_WIDTH, logo_path
         "iq_label":     _load_font(17, bold=True),
         "iq_sublabel":  _load_font(13, bold=False),
         "iq_score":     _load_font(52, bold=True),
+        "score_den":    _load_font(19, bold=True),
         "iq_tier":      _load_font(12, bold=True),
         "metric_name":  _load_font(14, bold=False),
         "metric_score": _load_font(22, bold=True),
+        "metric_den":   _load_font(13, bold=True),
         "metric_tag":   _load_font(11, bold=True),
         "tiny":         _load_font(10, bold=True),
         "stat_label":   _load_font(13, bold=False),
@@ -685,19 +712,37 @@ def create_premium_overlay(frame, metrics, frame_number, TARGET_WIDTH, logo_path
     SCORE_RIGHT_X  = TAG_X - 10   # score right-edge
 
     # ── TIER HELPERS ─────────────────────────────────────────────────────────
-    def _tkey(s):
-        if s >= 200: return "excellent"
-        if s >= 150: return "strong"
-        if s >= 100: return "developing"
-        return "needs"
+    def _band(s):
+        return _score_band(s)
 
     def _tcolor(s):
-        return {"excellent": C["blue"], "strong": C["green"],
-                "developing": C["amber"], "needs": C["red"]}[_tkey(s)]
+        return {
+            "excellent": C["blue"],
+            "proficient": C["green"],
+            "developing": C["amber"],
+            "emerging": C["red"],
+        }[_band(s)["key"]]
 
     def _tlabel(s):
-        return {"excellent": "Excellent", "strong": "Strong",
-                "developing": "Developing", "needs": "Needs Work"}[_tkey(s)]
+        return _band(s)["label"]
+
+    def _level_number(score):
+        return _blueiq_level_info(score)["level"]
+
+    def _level_color(level):
+        if level <= 5:
+            return C["amber"]
+        if level <= 7:
+            return C["green"]
+        return C["blue"]
+
+    def draw_level_dots(x, y, level, active_color):
+        dot_gap = 7
+        for idx in range(LEVEL_COUNT):
+            cx = x + idx * dot_gap
+            fill = active_color if idx < level else (46, 61, 86)
+            outline = active_color if idx < level else (72, 88, 112)
+            draw.ellipse((cx, y, cx + 4, y + 4), fill=fill, outline=outline)
 
     # Compute Blue IQ
     blue_iq = (
@@ -763,13 +808,17 @@ def create_premium_overlay(frame, metrics, frame_number, TARGET_WIDTH, logo_path
     IQ_H = 74
     draw.rounded_rectangle((panel_x, y, panel_x+panel_w, y+IQ_H),
                             radius=14, fill=C["card"], outline=C["border"], width=1)
-    draw.text((panel_x+16, y+10), "Blue IQ",               fill=C["blue"],  font=F["iq_label"])
-    draw.text((panel_x+16, y+36), _blueiq_level_label(blue_iq), fill=C["muted"], font=F["iq_sublabel"])
+    draw.text((panel_x+16, y+10), "Blue IQ", fill=C["blue"], font=F["iq_label"])
+    level_label = _blueiq_level_label(blue_iq)
+    draw.text((panel_x+16, y+36), level_label, fill=C["muted"], font=F["iq_sublabel"])
 
-    score_str = f"{blue_iq:.0f}"
+    display_blue_iq = int(round(_clamp_score(blue_iq)))
+    score_str = f"{display_blue_iq}"
     sw = draw.textlength(score_str, font=F["iq_score"])
-    tier_txt  = _tlabel(blue_iq).upper()
-    tier_col  = _tcolor(blue_iq)
+    denom = f"/{MAX_BLUE_SCORE}"
+    denom_w = draw.textlength(denom, font=F["score_den"])
+    tier_txt  = _tlabel(display_blue_iq).upper()
+    tier_col  = _tcolor(display_blue_iq)
 
     iq_tag_w = max(90, int(draw.textlength(tier_txt, font=F["iq_tier"]) + 22))
     iq_tag_h = 24
@@ -777,7 +826,9 @@ def create_premium_overlay(frame, metrics, frame_number, TARGET_WIDTH, logo_path
     iq_tag_y = y + 28
 
     score_right = iq_tag_x - 12
-    draw.text((score_right - sw, y + 4), score_str, fill=C["text"], font=F["iq_score"])
+    denom_x = score_right - denom_w
+    draw.text((denom_x - sw - 3, y + 4), score_str, fill=C["text"], font=F["iq_score"])
+    draw.text((denom_x, y + 39), denom, fill=C["muted"], font=F["score_den"])
     draw.rounded_rectangle((iq_tag_x, iq_tag_y, iq_tag_x+iq_tag_w, iq_tag_y+iq_tag_h),
                             radius=11, fill=(20,36,58), outline=tier_col, width=1)
     tw = draw.textlength(tier_txt, font=F["iq_tier"])
@@ -785,15 +836,22 @@ def create_premium_overlay(frame, metrics, frame_number, TARGET_WIDTH, logo_path
 
     y += IQ_H + 8
 
-    # Level pills (4 colored bars)
-    pill_gap  = 5
-    punit     = (panel_w - pill_gap * 3) // 5
-    px_cur    = panel_x
-    for pcol, flex in [(C["red"],1),(C["amber"],1),(C["green"],1),(C["blue"],2)]:
-        pw = punit * flex + pill_gap * (flex - 1)
-        draw.rounded_rectangle((px_cur, y, px_cur+pw, y+4), radius=2, fill=pcol)
-        px_cur += pw + pill_gap
-    y += 14
+    # 9-level bar: each completed level remains visually separated.
+    level_bar_x = panel_x
+    level_bar_y = y
+    level_bar_w = panel_w
+    level_bar_h = 6
+    segment_gap = 4
+    segment_w = (level_bar_w - segment_gap * (LEVEL_COUNT - 1)) / LEVEL_COUNT
+    completed_levels = _level_number(display_blue_iq)
+    fill_color = _level_color(completed_levels)
+    for idx in range(LEVEL_COUNT):
+        sx = int(level_bar_x + idx * (segment_w + segment_gap))
+        ex = int(level_bar_x + (idx + 1) * segment_w + idx * segment_gap)
+        segment_color = fill_color if idx < completed_levels else C["track"]
+        draw.rounded_rectangle((sx, level_bar_y, ex, level_bar_y + level_bar_h),
+                                radius=3, fill=segment_color)
+    y += 16
 
     # ── METRIC CARDS ─────────────────────────────────────────────────────────
     # Budget: allocate card height so everything fits top-to-bottom with safe margin.
@@ -834,12 +892,17 @@ def create_premium_overlay(frame, metrics, frame_number, TARGET_WIDTH, logo_path
         draw.text((LABEL_X, text_y + 4), label, fill=C["text_soft"], font=F["metric_name"])
 
         # Score (right-anchored before tag)
-        ss   = f"{score:.0f}"
+        display_score = int(round(_clamp_score(score)))
+        ss   = f"{display_score}"
+        denom = f"/{MAX_BLUE_SCORE}"
+        denom_w = draw.textlength(denom, font=F["metric_den"])
         sc_w = draw.textlength(ss, font=F["metric_score"])
-        draw.text((SCORE_RIGHT_X - sc_w, text_y), ss, fill=C["text"], font=F["metric_score"])
+        denom_x = SCORE_RIGHT_X - denom_w
+        draw.text((denom_x - sc_w - 3, text_y), ss, fill=C["text"], font=F["metric_score"])
+        draw.text((denom_x, text_y + 9), denom, fill=C["muted"], font=F["metric_den"])
 
         # Tag pill (right-anchored)
-        tag_text = _tlabel(score)
+        tag_text = _tlabel(display_score)
         tag_tw   = draw.textlength(tag_text, font=F["metric_tag"])
         tag_pad  = (TAG_W - tag_tw) / 2
         tag_y    = cy + (CARD_H - TAG_H) // 2
@@ -852,7 +915,7 @@ def create_premium_overlay(frame, metrics, frame_number, TARGET_WIDTH, logo_path
         bar_y  = cy + CARD_H - bar_bottom_pad - 5
         bar_x  = panel_x + 12
         bar_w  = panel_w - 24
-        fw     = int(bar_w * (_clamp_score(score) - 60) / 180)
+        fw     = int(bar_w * _score_fill_ratio(display_score))
         draw.rounded_rectangle((bar_x, bar_y, bar_x+bar_w, bar_y+5), radius=3, fill=C["track"])
         if fw > 0:
             draw.rounded_rectangle((bar_x, bar_y, bar_x+fw, bar_y+5), radius=3, fill=col)

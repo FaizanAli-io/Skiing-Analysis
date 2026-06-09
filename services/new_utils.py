@@ -506,7 +506,8 @@ def detect_ski_lines(frame, ski_boxes, flag, rotation_angle=0):
             flag = True
 
         for idx, (x1, y1, x2, y2) in enumerate(ski_boxes):
-            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 2)
+            # Keep detection boxes hidden for client-facing output; ski vector lines below remain visible.
+            # cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 2)
             ski_roi = frame[y1:y2, x1:x2]
 
             if ski_roi.size == 0:
