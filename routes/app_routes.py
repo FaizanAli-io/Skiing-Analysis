@@ -2,26 +2,19 @@ from fastapi import APIRouter, HTTPException, Depends
 from sqlalchemy.orm import Session
 from typing import List, Optional
 from datetime import datetime,date
-import secrets
 from fastapi import Form
 
 from models.person import Person
 from models.video_analysis import VideoAnalysis
 from database import get_db
 from pydantic import BaseModel
-from routes import app_routes 
 router = APIRouter(prefix="/app", tags=["App-Data"])
-
-# Generate and log token (share this with the client)
-VALID_TOKEN = "b7cfba556c4033485d13942ef8e43379"
-print("VALID TOKEN TO USE IN /app REQUESTS:", VALID_TOKEN)
 
 
 # Request & Response Schemas
 class AppRequest(BaseModel):
     before: Optional[datetime] = None
     after: Optional[datetime] = None
-    token: str
 
 class Score(BaseModel):
     date: datetime
@@ -40,14 +33,10 @@ from fastapi import Form
 
 @router.post("/app", response_model=List[PersonScores])
 def get_app_data(
-    token: str = Form(...),
     before: Optional[date] = Form(None),
     after: Optional[date] = Form(None),
     db: Session = Depends(get_db)
 ):
-    if token != VALID_TOKEN:
-        raise HTTPException(status_code=403, detail="Invalid token")
-
     if before is None and after is None:
         raise HTTPException(status_code=400, detail="Either 'before' or 'after' must be provided.")
 

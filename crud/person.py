@@ -4,10 +4,13 @@ from schemas.person import PersonCreate
 from fastapi import HTTPException
 def create_person(db: Session, person: PersonCreate):
 
-    existing_person = db.query(Person).filter(Person.email == person.email).first()
+    existing_person = None
+    if person.email:
+        existing_person = db.query(Person).filter(Person.email == person.email).first()
     if existing_person:
         raise HTTPException(status_code=400, detail="Email already registered")
-    db_person = Person(**person.dict())
+    data = person.dict()
+    db_person = Person(**data)
     db.add(db_person)
     db.commit()
     db.refresh(db_person)

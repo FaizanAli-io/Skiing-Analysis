@@ -430,6 +430,101 @@ def draw_pose_connections(frame, coords):
     return frame
 
 
+def _draw_biomech_label(frame, text, x, y, color=(180, 230, 255)):
+    """Draw a compact readable label for coach-mode biomechanics overlays."""
+    try:
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        scale = 0.45
+        thickness = 1
+        (tw, th), baseline = cv2.getTextSize(text, font, scale, thickness)
+        x = max(4, min(x, frame.shape[1] - tw - 12))
+        y = max(th + 8, min(y, frame.shape[0] - 8))
+        cv2.rectangle(frame, (x - 5, y - th - 6), (x + tw + 7, y + baseline + 5), (8, 18, 34), -1)
+        cv2.rectangle(frame, (x - 5, y - th - 6), (x + tw + 7, y + baseline + 5), color, 1)
+        cv2.putText(frame, text, (x, y), font, scale, color, thickness, cv2.LINE_AA)
+    except Exception:
+        pass
+
+
+def _line_midpoint(line):
+    x1, y1, x2, y2 = line
+    return ((x1 + x2) // 2, (y1 + y2) // 2)
+
+
+def draw_biomechanics_overlay(frame, body_points, ski_lines, metrics):
+    """Draw coach-mode visual guides for the live biomechanics values.
+
+    This is display-only and does not alter scoring inputs.
+    """
+    try:
+        guide = (190, 230, 255)
+        accent = (90, 180, 255)
+        white = (245, 250, 255)
+
+        # Body alignment: shoulder midpoint to hip midpoint.
+        left_shoulder = body_points.get("left_shoulder")
+        right_shoulder = body_points.get("right_shoulder")
+        left_hip = body_points.get("left_hip")
+        right_hip = body_points.get("right_hip")
+        left_knee = body_points.get("left_knee")
+        right_knee = body_points.get("right_knee")
+        left_foot = body_points.get("left_foot")
+        right_foot = body_points.get("right_foot")
+        navel = body_points.get("navel")
+
+        if left_shoulder and right_shoulder and left_hip and right_hip:
+            shoulder_mid = ((left_shoulder[0] + right_shoulder[0]) // 2, (left_shoulder[1] + right_shoulder[1]) // 2)
+            hip_mid = ((left_hip[0] + right_hip[0]) // 2, (left_hip[1] + right_hip[1]) // 2)
+            cv2.line(frame, shoulder_mid, hip_mid, guide, 2, cv2.LINE_AA)
+            cv2.circle(frame, shoulder_mid, 4, white, -1, cv2.LINE_AA)
+            cv2.circle(frame, hip_mid, 4, white, -1, cv2.LINE_AA)
+            hip_angle = metrics.get("hip_angle")
+            if isinstance(hip_angle, (int, float)):
+                _draw_biomech_label(frame, f"Hip {hip_angle:.0f} deg", hip_mid[0] + 12, hip_mid[1] - 12, guide)
+
+        # Athletic stance / bend guide around the knees.
+        if navel and left_knee and left_foot:
+            cv2.line(frame, navel, left_knee, (120, 220, 180), 2, cv2.LINE_AA)
+            cv2.line(frame, left_knee, left_foot, (120, 220, 180), 2, cv2.LINE_AA)
+            cv2.circle(frame, left_knee, 5, (120, 220, 180), -1, cv2.LINE_AA)
+        if navel and right_knee and right_foot:
+            cv2.line(frame, navel, right_knee, (120, 220, 180), 2, cv2.LINE_AA)
+            cv2.line(frame, right_knee, right_foot, (120, 220, 180), 2, cv2.LINE_AA)
+            cv2.circle(frame, right_knee, 5, (120, 220, 180), -1, cv2.LINE_AA)
+            bend_angle = metrics.get("bend_angle")
+            if isinstance(bend_angle, (int, float)):
+                _draw_biomech_label(frame, f"Stance {bend_angle:.0f} deg", right_knee[0] + 12, right_knee[1] + 8, (120, 220, 180))
+
+        # Ski lines, separation, and edge-to-vertical reference.
+        if ski_lines:
+            first_line = ski_lines[0]
+            x1, y1, x2, y2 = first_line
+            cv2.line(frame, (x1, y1), (x2, y2), accent, 3, cv2.LINE_AA)
+            mid_x, mid_y = _line_midpoint(first_line)
+            ref_len = 70
+            cv2.line(frame, (mid_x, mid_y - ref_len // 2), (mid_x, mid_y + ref_len // 2), white, 1, cv2.LINE_AA)
+            edge_angle = metrics.get("edge_angle")
+            if isinstance(edge_angle, (int, float)):
+                _draw_biomech_label(frame, f"Edge {edge_angle:.0f} deg", mid_x + 12, mid_y - 18, accent)
+
+        if len(ski_lines) >= 2:
+            mid_a = _line_midpoint(ski_lines[0])
+            mid_b = _line_midpoint(ski_lines[1])
+            cv2.line(frame, mid_a, mid_b, white, 2, cv2.LINE_AA)
+            cv2.circle(frame, mid_a, 4, white, -1, cv2.LINE_AA)
+            cv2.circle(frame, mid_b, 4, white, -1, cv2.LINE_AA)
+            sep = metrics.get("ski_separation")
+            if isinstance(sep, (int, float)):
+                label_x = (mid_a[0] + mid_b[0]) // 2 + 10
+                label_y = (mid_a[1] + mid_b[1]) // 2 - 10
+                _draw_biomech_label(frame, f"Skis {sep:.0f} deg", label_x, label_y, white)
+
+    except Exception:
+        return frame
+
+    return frame
+
+
 def calculate_adjusted_speed(left_hip, right_hip, prev_point, speed_list, actual_speed):
     # Compute midpoint (current point)
     current_point = ((left_hip[0] + right_hip[0]) // 2, (left_hip[1] + right_hip[1]) // 2)

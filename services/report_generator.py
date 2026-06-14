@@ -1,0 +1,705 @@
+import json
+import logging
+import math
+import os
+import re
+from datetime import date, datetime
+from typing import Any, Dict, List, Optional
+
+import httpx
+from dotenv import load_dotenv
+
+try:
+    from PIL import Image, ImageDraw, ImageFont
+except ImportError:
+    Image = None
+    ImageDraw = None
+    ImageFont = None
+
+logger = logging.getLogger(__name__)
+
+MAX_SCORE = 240
+PAGE_W = 1275
+PAGE_H = 1650
+
+SCORE_BANDS = (
+    ("Emerging", 60, 129, (255, 93, 76)),
+    ("Developing", 130, 169, (245, 158, 11)),
+    ("Proficient", 170, 199, (34, 197, 94)),
+    ("Excellent", 200, 240, (106, 175, 255)),
+)
+
+FACTOR_KEYS = (
+    "ski_parallel_control",
+    "edge_control",
+    "upper_body_alignment",
+    "athletic_stance_knee",
+    "athletic_stance_bend",
+    "transition_control",
+)
+
+COACHING_FACTOR_LABELS = {
+    "ski_parallel_control": "Ski parallel control",
+    "edge_control": "Edge control",
+    "upper_body_alignment": "Upper-body alignment",
+    "athletic_stance_knee": "Knee flexion",
+    "athletic_stance_bend": "Athletic stance",
+    "transition_control": "Turn-to-turn transition control",
+}
+
+PILLAR_GUIDANCE = {
+    "pressure": "Pressure reflects how consistently the skier manages load and release through each turn.",
+    "balance": "Balance reflects centered body position, stability, and control through the fall line.",
+    "rotation": "Rotation reflects upper-body discipline and how cleanly the skier directs each turn.",
+    "edging": "Edging reflects edge engagement, ski parallel control, and ability to hold a clean arc.",
+}
+
+APPROVED_COACHING_CUES = {
+    "pressure": {
+        "emerging": "Build a smoother pressure release so the skier is not forced back at the end of the turn.",
+        "developing": "Work on applying pressure progressively across both skis instead of loading the turn all at once.",
+        "proficient": "Refine pressure timing so the skier can stay strong through the middle of the turn.",
+        "excellent": "Maintain the same pressure control while increasing turn shape and speed.",
+    },
+    "balance": {
+        "emerging": "Focus on staying centered over the feet before adding more speed or turn shape.",
+        "developing": "Build a quieter upper body and keep the stance centered through each transition.",
+        "proficient": "Refine balance consistency as the skier moves from one edge to the next.",
+        "excellent": "Keep the same centered stance while challenging the skier with more varied turn shapes.",
+    },
+    "rotation": {
+        "emerging": "Keep the upper body calmer so the skis can finish the turn without extra twisting.",
+        "developing": "Work on separating upper-body discipline from lower-body turning action.",
+        "proficient": "Refine rotational control so the skier directs the turn without over-rotating the shoulders.",
+        "excellent": "Maintain disciplined rotation while increasing tempo and precision.",
+    },
+    "edging": {
+        "emerging": "Start with cleaner ski alignment so both skis work together earlier in the turn.",
+        "developing": "Improve edge engagement by keeping the skis more parallel through the turn entry.",
+        "proficient": "Refine edge control so the skier can hold a cleaner arc through the fall line.",
+        "excellent": "Preserve strong edge control while increasing speed and consistency.",
+    },
+}
+
+
+def _score_band(score: float) -> str:
+    rounded = int(round(float(score or 0)))
+    for label, low, high, _color in SCORE_BANDS:
+        if low <= rounded <= high:
+            return label
+    return "Emerging" if rounded < 60 else "Excellent"
+
+
+def _score_color(score: float) -> tuple:
+    rounded = int(round(float(score or 0)))
+    for _label, low, high, color in SCORE_BANDS:
+        if low <= rounded <= high:
+            return color
+    return SCORE_BANDS[0][3] if rounded < 60 else SCORE_BANDS[-1][3]
+
+
+def _score_band_key(score: float) -> str:
+    return _score_band(score).lower()
+
+
+def _approved_cue(pillar: str, score: float) -> str:
+    pillar_cues = APPROVED_COACHING_CUES.get(pillar, {})
+    return pillar_cues.get(_score_band_key(score)) or PILLAR_GUIDANCE.get(pillar, "")
+
+
+def _approved_improvement_areas(scores: Dict[str, Any], limit: int = 3) -> List[str]:
+    ranked = sorted(
+        (
+            ("pressure", scores["pressure"]),
+            ("balance", scores["balance"]),
+            ("rotation", scores["rotation"]),
+            ("edging", scores["edging"]),
+        ),
+        key=lambda item: item[1],
+    )
+    return [_approved_cue(pillar, score) for pillar, score in ranked[:limit]]
+
+
+def _safe_average(values: List[float]) -> Optional[float]:
+    clean = [float(value) for value in values if isinstance(value, (int, float))]
+    if not clean:
+        return None
+    return round(sum(clean) / len(clean), 1)
+
+
+def _round_score(value: Any) -> Optional[int]:
+    if not isinstance(value, (int, float)):
+        return None
+    return int(round(float(value)))
+
+
+def _ceil_score(value: Any) -> int:
+    return int(math.ceil(float(value or 0)))
+
+
+def build_score_windows(score_timeline: List[Dict[str, Any]], window_seconds: int = 10) -> List[Dict[str, Any]]:
+    """Average pillar scores and coaching factors into fixed time windows."""
+    windows: Dict[int, Dict[str, Any]] = {}
+    pillar_keys = ("pressure", "balance", "rotation", "edging")
+
+    for item in score_timeline:
+        time_sec = float(item.get("time_seconds") or 0)
+        window_index = int(time_sec // window_seconds)
+        bucket = windows.setdefault(
+            window_index,
+            {
+                "start_seconds": window_index * window_seconds,
+                "end_seconds": (window_index + 1) * window_seconds,
+                **{key: [] for key in pillar_keys},
+                **{key: [] for key in FACTOR_KEYS},
+            },
+        )
+        for key in (*pillar_keys, *FACTOR_KEYS):
+            value = item.get(key)
+            if isinstance(value, (int, float)):
+                bucket[key].append(float(value))
+
+    averaged = []
+    for index in sorted(windows):
+        bucket = windows[index]
+        row = {
+            "window": f"{bucket['start_seconds']}-{bucket['end_seconds']} sec",
+            "pillar_scores": {},
+            "coaching_factors": {},
+        }
+        for key in pillar_keys:
+            row["pillar_scores"][key] = _safe_average(bucket[key])
+        for key in FACTOR_KEYS:
+            row["coaching_factors"][key] = _safe_average(bucket[key])
+        averaged.append(row)
+
+    return averaged
+
+
+def _load_font(size: int, bold: bool = False):
+    if ImageFont is None:
+        return None
+
+    candidates = [
+        "C:/Windows/Fonts/segoeuib.ttf" if bold else "C:/Windows/Fonts/segoeui.ttf",
+        "C:/Windows/Fonts/arialbd.ttf" if bold else "C:/Windows/Fonts/arial.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "arialbd.ttf" if bold else "arial.ttf",
+    ]
+    for path in candidates:
+        try:
+            return ImageFont.truetype(path, size)
+        except Exception:
+            continue
+    return ImageFont.load_default()
+
+
+def _load_session_font(size: int):
+    if ImageFont is None:
+        return None
+    candidates = [
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+        "C:/Windows/Fonts/arialbd.ttf",
+        "C:/Windows/Fonts/segoeuib.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "LiberationSans-Bold.ttf",
+        "arialbd.ttf",
+    ]
+    for path in candidates:
+        try:
+            return ImageFont.truetype(path, size)
+        except Exception:
+            continue
+    return _load_font(size, bold=True)
+
+
+def _format_session_date(session_date):
+    if not session_date:
+        return None
+    if isinstance(session_date, datetime):
+        value = session_date.date()
+    elif isinstance(session_date, date):
+        value = session_date
+    else:
+        text = str(session_date).strip()
+        try:
+            value = datetime.fromisoformat(text).date()
+        except ValueError:
+            return text
+    return f"{value.strftime('%B')} {value.day}, {value.year}"
+
+
+def _text_width(draw, text: str, font) -> int:
+    return int(draw.textbbox((0, 0), text, font=font)[2])
+
+
+def _wrap_text(draw, text: str, font, max_width: int) -> List[str]:
+    words = str(text or "").replace("\n", " ").split()
+    lines: List[str] = []
+    current = ""
+    for word in words:
+        candidate = f"{current} {word}".strip()
+        if _text_width(draw, candidate, font) <= max_width:
+            current = candidate
+        else:
+            if current:
+                lines.append(current)
+            current = word
+    if current:
+        lines.append(current)
+    return lines
+
+
+def _draw_wrapped(draw, text: str, x: int, y: int, max_width: int, font, fill, line_gap: int = 8, max_lines: Optional[int] = None) -> int:
+    lines = _wrap_text(draw, text, font, max_width)
+    if max_lines:
+        lines = lines[:max_lines]
+    line_h = int(font.size * 1.25) if hasattr(font, "size") else 22
+    for line in lines:
+        draw.text((x, y), line, fill=fill, font=font)
+        y += line_h + line_gap
+    return y
+
+
+def _fit_text_to_lines(draw, text: str, font, max_width: int, max_lines: int) -> str:
+    """Keep text inside a card without chopping mid-sentence."""
+    text = _clean_report_text(text)
+    sentences = re.split(r"(?<=[.!?])\s+", text)
+    kept: List[str] = []
+    for sentence in sentences:
+        sentence = sentence.strip()
+        if not sentence:
+            continue
+        candidate = " ".join([*kept, sentence]).strip()
+        if len(_wrap_text(draw, candidate, font, max_width)) <= max_lines:
+            kept.append(sentence)
+        else:
+            break
+    if kept:
+        return " ".join(kept)
+
+    lines = _wrap_text(draw, text, font, max_width)
+    clipped = " ".join(lines[:max_lines]).strip()
+    if clipped and clipped[-1] not in ".!?":
+        clipped = clipped.rstrip(",;:") + "."
+    return clipped
+
+
+def _draw_badge(draw, text: str, x: int, y: int, color: tuple, font) -> None:
+    text_w = _text_width(draw, text, font)
+    draw.rounded_rectangle((x, y, x + text_w + 34, y + 34), radius=17, fill=(10, 24, 42), outline=color, width=2)
+    draw.text((x + 17, y + 7), text, fill=color, font=font)
+
+
+def _draw_score_bar(draw, x: int, y: int, w: int, score: float, color: tuple) -> None:
+    score = max(0, min(MAX_SCORE, float(score or 0)))
+    fill_w = int(w * (score / MAX_SCORE))
+    draw.rounded_rectangle((x, y, x + w, y + 10), radius=5, fill=(35, 52, 76))
+    draw.rounded_rectangle((x, y, x + fill_w, y + 10), radius=5, fill=color)
+
+
+def _coerce_text(value: Any, fallback: str = "") -> str:
+    """Convert model JSON values into clean report text."""
+    if value is None:
+        return fallback
+    if isinstance(value, str):
+        return value.strip() or fallback
+    if isinstance(value, list):
+        parts = [_coerce_text(item) for item in value]
+        return " ".join(part for part in parts if part).strip() or fallback
+    if isinstance(value, dict):
+        preferred_keys = ("summary", "assessment", "coaching_focus", "focus", "recommendation", "text")
+        parts = [_coerce_text(value.get(key)) for key in preferred_keys if key in value]
+        if not parts:
+            parts = [_coerce_text(item) for item in value.values()]
+        return " ".join(part for part in parts if part).strip() or fallback
+    return str(value).strip() or fallback
+
+
+def _clean_report_text(text: str) -> str:
+    text = _coerce_text(text)
+    text = re.sub(r"\b(\d+)\.0\b", r"\1", text)
+    text = re.sub(r"\b(\d+)\.\d+\b", r"\1", text)
+    replacements = {
+        "window 1": "the first part of the run",
+        "window 2": "the middle part of the run",
+        "window 3": "the final part of the run",
+        "Window 1": "The first part of the run",
+        "Window 2": "The middle part of the run",
+        "Window 3": "The final part of the run",
+        "10-second window": "part of the run",
+        "10 second window": "part of the run",
+        "windows": "parts of the run",
+        "Windows": "Parts of the run",
+        "segments": "parts of the run",
+        "segment": "part of the run",
+        "Segments": "Parts of the run",
+        "Segment": "Part of the run",
+    }
+    for old, new in replacements.items():
+        text = text.replace(old, new)
+    return " ".join(text.split())
+
+
+def _clean_sections(sections: Dict[str, Any]) -> Dict[str, Any]:
+    sections["overall"] = _clean_report_text(sections.get("overall"))
+    for key, section in sections.get("pillars", {}).items():
+        section["summary"] = _clean_report_text(section.get("summary"))
+        section["coaching_focus"] = _clean_report_text(section.get("coaching_focus"))
+    sections["improvement_areas"] = [
+        _clean_report_text(item) for item in sections.get("improvement_areas", []) if _clean_report_text(item)
+    ]
+    return sections
+
+
+def _apply_approved_cues(sections: Dict[str, Any], payload: Dict[str, Any]) -> Dict[str, Any]:
+    scores = payload["final_scores"]
+    pillars = sections.setdefault("pillars", {})
+    for pillar in ("pressure", "balance", "rotation", "edging"):
+        pillar_section = pillars.setdefault(pillar, {})
+        pillar_section["coaching_focus"] = _approved_cue(pillar, scores[pillar])
+    sections["improvement_areas"] = _approved_improvement_areas(scores)
+    return _clean_sections(sections)
+
+
+def _run_segment_label(index: int, total: int) -> str:
+    if total <= 1:
+        return "Full run"
+    if index == 0:
+        return "First part of the run"
+    if index == total - 1:
+        return "Final part of the run"
+    return "Middle part of the run" if total == 3 else f"Middle part {index}"
+
+
+def _build_prompt_segments(score_windows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    segments = []
+    total = len(score_windows)
+    for index, row in enumerate(score_windows):
+        segment = {
+            "part": _run_segment_label(index, total),
+            "pillar_scores": {},
+            "coaching_factors": {},
+        }
+        for key, value in row.get("pillar_scores", {}).items():
+            segment["pillar_scores"][key] = _ceil_score(value) if isinstance(value, (int, float)) else None
+        for key, value in row.get("coaching_factors", {}).items():
+            segment["coaching_factors"][key] = _round_score(value)
+        segments.append(segment)
+    return segments
+
+
+def _fallback_sections(payload: Dict[str, Any]) -> Dict[str, Any]:
+    scores = payload["final_scores"]
+    ranked = sorted(
+        (
+            ("pressure", scores["pressure"]),
+            ("balance", scores["balance"]),
+            ("rotation", scores["rotation"]),
+            ("edging", scores["edging"]),
+        ),
+        key=lambda item: item[1],
+        reverse=True,
+    )
+    strongest_key, strongest_score = ranked[0]
+    weakest_key, weakest_score = ranked[-1]
+    strongest = strongest_key.title()
+    weakest = weakest_key.title()
+
+    pillars = {}
+    for key in ("pressure", "balance", "rotation", "edging"):
+        label = key.title()
+        score = scores[key]
+        pillars[key] = {
+            "summary": f"{label} scored {score:.0f}/240, placing it in the {_score_band(score).lower()} range.",
+            "coaching_focus": _approved_cue(key, score),
+        }
+
+    return _apply_approved_cues({
+        "overall": (
+            f"The skier finished with a Blue IQ of {scores['blue_iq']:.0f}/240, "
+            f"which is currently {_score_band(scores['blue_iq']).lower()}. "
+            f"The strongest pillar was {strongest} at {strongest_score:.0f}/240, while "
+            f"{weakest} needs the most attention at {weakest_score:.0f}/240."
+        ),
+        "pillars": pillars,
+        "improvement_areas": _approved_improvement_areas(scores),
+    }, payload)
+
+
+def _parse_json_content(content: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        parsed = json.loads(content)
+    except Exception:
+        logger.warning("OpenAI report response was not valid JSON; using fallback sections")
+        return _fallback_sections(payload)
+
+    fallback = _fallback_sections(payload)
+    pillars = parsed.get("pillars") if isinstance(parsed.get("pillars"), dict) else {}
+    for key in ("pressure", "balance", "rotation", "edging"):
+        if not isinstance(pillars.get(key), dict):
+            pillars[key] = fallback["pillars"][key]
+        pillars[key].setdefault("summary", fallback["pillars"][key]["summary"])
+        pillars[key].setdefault("coaching_focus", fallback["pillars"][key]["coaching_focus"])
+
+    improvements = parsed.get("improvement_areas")
+    if not isinstance(improvements, list) or not improvements:
+        improvements = fallback["improvement_areas"]
+
+    return _apply_approved_cues({
+        "overall": _coerce_text(parsed.get("overall"), fallback["overall"]),
+        "pillars": pillars,
+        "improvement_areas": [_coerce_text(item) for item in improvements[:4]],
+    }, payload)
+
+
+def _generate_openai_sections(payload: Dict[str, Any], use_openai: bool = True) -> Dict[str, Any]:
+    if not use_openai:
+        return _fallback_sections(payload)
+
+    load_dotenv()
+    api_key = os.getenv("OPENAI_API_KEY") or os.getenv("OPENAI_API")
+    if not api_key:
+        return _fallback_sections(payload)
+
+    prompt = (
+        "Create a serious, professional one-page ski coaching report from the JSON data. "
+        "Return only valid JSON with keys: overall, pillars, improvement_areas. "
+        "overall must be a single string, not an object. improvement_areas must be an array of strings. "
+        "pillars must contain pressure, balance, rotation, edging. Each pillar must contain "
+        "summary and coaching_focus as strings. Use final scores and run segment data. "
+        "Do not invent coaching advice. coaching_focus will be replaced by approved Bluerun cues. "
+        "Use coaching_focus only as a brief observation, not a technical instruction. "
+        "Use integer scores only. Never write decimals. "
+        "Do not use the words window, windows, segment, segments, bucket, or timeframe. "
+        "Use human phrases like first part of the run, middle of the run, or later in the run. "
+        "Each pillar summary must be one short sentence. Each coaching_focus must be one short sentence. "
+        "Mention strengths, but do not over-praise. Clearly guide what needs improvement. "
+        "Do not use raw measurement variable names such as ski_angle, hip_angle, bend_angle, "
+        "lateral movement, or pixels. Use coaching language instead: ski parallel control, "
+        "edge control, upper-body alignment, knee flexion, athletic stance, and transition control. "
+        "Keep each paragraph concise so it fits a one-page PDF.\n\n"
+        f"Report data:\n{json.dumps(payload, indent=2)}"
+    )
+
+    try:
+        response = httpx.post(
+            "https://api.openai.com/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+                "messages": [
+                    {"role": "system", "content": "You write ski coaching reports for instructors and athletes."},
+                    {"role": "user", "content": prompt},
+                ],
+                "temperature": 0.35,
+                "max_tokens": 900,
+                "response_format": {"type": "json_object"},
+            },
+            timeout=45,
+        )
+        response.raise_for_status()
+        content = response.json()["choices"][0]["message"]["content"].strip()
+        return _parse_json_content(content, payload)
+    except Exception as exc:
+        logger.error(f"OpenAI PDF report generation failed, using fallback sections: {exc}")
+        return _fallback_sections(payload)
+
+
+def _draw_header(canvas: Image.Image, draw, fonts: Dict[str, Any], logo_path: str, payload: Dict[str, Any]) -> None:
+    colors = {
+        "text": (238, 246, 255),
+        "muted": (150, 169, 194),
+        "blue": (106, 175, 255),
+    }
+
+    logo_loaded = False
+    if logo_path and os.path.exists(logo_path):
+        try:
+            logo = Image.open(logo_path).convert("RGBA")
+            logo.thumbnail((270, 82), Image.LANCZOS)
+            canvas.paste(logo, (62, 58), logo)
+            logo_loaded = True
+        except Exception as exc:
+            logger.error(f"Unable to load report logo: {exc}")
+
+    if not logo_loaded:
+        draw.text((72, 70), "bluerun", fill=colors["blue"], font=fonts["brand"])
+
+    draw.text((72, 142), "Ski Performance Report", fill=colors["text"], font=fonts["title"])
+    session_name = str(payload.get("user_name") or "").strip()
+    if session_name:
+        name_font = _load_session_font(34)
+        meta_font = _load_session_font(15)
+        name_x, name_y = 72, 196
+        draw.text((name_x + 2, name_y + 2), session_name, fill=(0, 0, 0), font=name_font)
+        draw.text((name_x, name_y), session_name, fill=(255, 255, 255), font=name_font)
+        name_bbox = draw.textbbox((name_x, name_y), session_name, font=name_font)
+        line_y = name_bbox[3] + 8
+        draw.rectangle((name_x, line_y, name_x + 44, line_y + 4), fill=colors["blue"])
+
+        cursor_x = name_x
+        meta_y = line_y + 16
+        if payload.get("attempt_number"):
+            run_text = f"RUN {payload['attempt_number']}"
+            draw.text((cursor_x, meta_y), run_text, fill=colors["blue"], font=meta_font)
+            cursor_x += int(draw.textlength(run_text, font=meta_font)) + 14
+
+        formatted_date = _format_session_date(payload.get("session_date"))
+        if payload.get("attempt_number") and formatted_date:
+            dot_cx = cursor_x + 2
+            dot_cy = meta_y + 10
+            draw.ellipse((dot_cx - 2, dot_cy - 2, dot_cx + 2, dot_cy + 2), fill=(100, 110, 120))
+            cursor_x += 14
+        if formatted_date:
+            draw.text((cursor_x, meta_y), formatted_date, fill=(160, 175, 190), font=meta_font)
+    else:
+        draw.text((72, 204), "One-page coaching summary generated from Blue IQ analysis", fill=colors["muted"], font=fonts["body"])
+
+    scores = payload["final_scores"]
+    blue_iq = scores["blue_iq"]
+    color = _score_color(blue_iq)
+    draw.rounded_rectangle((865, 58, 1215, 238), radius=28, fill=(10, 24, 42), outline=(34, 69, 110), width=2)
+    draw.text((905, 88), "BLUE IQ", fill=colors["blue"], font=fonts["small_bold"])
+    draw.text((905, 122), f"{blue_iq:.0f}", fill=colors["text"], font=fonts["score"])
+    draw.text((1032, 160), f"/ {MAX_SCORE}", fill=colors["muted"], font=fonts["body_bold"])
+    _draw_badge(draw, _score_band(blue_iq).upper(), 905, 190, color, fonts["tiny_bold"])
+
+
+def _draw_pillar_card(draw, x: int, y: int, w: int, h: int, name: str, score: float, section: Dict[str, str], fonts: Dict[str, Any]) -> None:
+    color = _score_color(score)
+    draw.rounded_rectangle((x, y, x + w, y + h), radius=22, fill=(12, 27, 47), outline=(34, 54, 82), width=2)
+    draw.rectangle((x, y + 24, x + 5, y + h - 24), fill=color)
+    draw.text((x + 28, y + 26), name, fill=(238, 246, 255), font=fonts["card_title"])
+    draw.text((x + w - 178, y + 25), f"{score:.0f}", fill=(238, 246, 255), font=fonts["metric_score"])
+    draw.text((x + w - 88, y + 40), f"/ {MAX_SCORE}", fill=(165, 181, 204), font=fonts["small_bold"])
+    _draw_badge(draw, _score_band(score).upper(), x + w - 184, y + 74, color, fonts["tiny_bold"])
+    _draw_score_bar(draw, x + 28, y + 90, w - 220, score, color)
+
+    summary = _coerce_text(section.get("summary"))
+    coaching_focus = _coerce_text(section.get("coaching_focus"))
+    body = _fit_text_to_lines(draw, f"{summary} {coaching_focus}".strip(), fonts["small"], w - 56, 4)
+    _draw_wrapped(draw, body, x + 28, y + 122, w - 56, fonts["small"], (180, 196, 218), line_gap=5, max_lines=4)
+
+
+def _draw_pdf_report(report_path: str, payload: Dict[str, Any], sections: Dict[str, Any]) -> None:
+    if Image is None:
+        raise RuntimeError("Pillow is required to generate PDF reports")
+
+    fonts = {
+        "brand": _load_font(44, bold=True),
+        "title": _load_font(40, bold=True),
+        "section": _load_font(25, bold=True),
+        "card_title": _load_font(25, bold=True),
+        "body": _load_font(22),
+        "body_bold": _load_font(22, bold=True),
+        "small": _load_font(18),
+        "small_bold": _load_font(17, bold=True),
+        "tiny_bold": _load_font(13, bold=True),
+        "score": _load_font(62, bold=True),
+        "metric_score": _load_font(34, bold=True),
+    }
+
+    canvas = Image.new("RGB", (PAGE_W, PAGE_H), (5, 10, 22))
+    draw = ImageDraw.Draw(canvas)
+    draw.ellipse((-220, -210, 620, 640), fill=(8, 35, 72))
+    draw.ellipse((760, -180, 1490, 520), fill=(7, 24, 52))
+
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    logo_path = os.path.join(script_dir, "bluerun.png")
+    _draw_header(canvas, draw, fonts, logo_path, payload)
+
+    draw.rounded_rectangle((60, 270, 1215, 470), radius=28, fill=(10, 24, 42), outline=(34, 54, 82), width=2)
+    draw.text((92, 302), "Overall Performance", fill=(238, 246, 255), font=fonts["section"])
+    overall_text = _fit_text_to_lines(draw, sections["overall"], fonts["body"], 1090, 4)
+    _draw_wrapped(draw, overall_text, 92, 350, 1090, fonts["body"], (186, 202, 224), line_gap=8, max_lines=4)
+
+    scores = payload["final_scores"]
+    pillar_sections = sections["pillars"]
+    card_w = 555
+    card_h = 255
+    _draw_pillar_card(draw, 60, 515, card_w, card_h, "Pressure", scores["pressure"], pillar_sections["pressure"], fonts)
+    _draw_pillar_card(draw, 660, 515, card_w, card_h, "Balance", scores["balance"], pillar_sections["balance"], fonts)
+    _draw_pillar_card(draw, 60, 805, card_w, card_h, "Rotation", scores["rotation"], pillar_sections["rotation"], fonts)
+    _draw_pillar_card(draw, 660, 805, card_w, card_h, "Edging", scores["edging"], pillar_sections["edging"], fonts)
+
+    draw.rounded_rectangle((60, 1102, 1215, 1494), radius=28, fill=(10, 24, 42), outline=(34, 54, 82), width=2)
+    draw.text((92, 1138), "Improvement Areas", fill=(238, 246, 255), font=fonts["section"])
+    y = 1192
+    for index, item in enumerate(sections["improvement_areas"][:4], start=1):
+        draw.ellipse((96, y + 7, 116, y + 27), fill=(106, 175, 255))
+        draw.text((102, y + 4), str(index), fill=(5, 10, 22), font=fonts["tiny_bold"])
+        y = _draw_wrapped(draw, item, 136, y, 1010, fonts["body"], (186, 202, 224), line_gap=6, max_lines=2) + 12
+
+    draw.text((72, 1542), "Score scale: 60-129 Emerging | 130-169 Developing | 170-199 Proficient | 200-240 Excellent", fill=(125, 143, 166), font=fonts["small"])
+    footer_parts = [f"Duration: {payload['duration_seconds']} sec"]
+    if int(payload.get("turns") or 0) > 0:
+        footer_parts.append(f"Turns: {payload['turns']}")
+    draw.text((940, 1542), "  |  ".join(footer_parts), fill=(125, 143, 166), font=fonts["small"])
+
+    canvas.save(report_path, "PDF", resolution=150.0)
+
+
+def generate_basic_report(
+    result: Dict[str, Any],
+    score_timeline: List[Dict[str, Any]],
+    use_openai: bool = True,
+    context: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Generate a one-page styled PDF ski report and return report metadata."""
+    final_scores = {
+        "blue_iq": _ceil_score(
+            (
+                result["pressure_score"]
+                + result["balance_score"]
+                + result["rotation_score"]
+                + result["edging_score"]
+            )
+            / 4
+        ),
+        "pressure": _ceil_score(result["pressure_score"]),
+        "balance": _ceil_score(result["balance_score"]),
+        "rotation": _ceil_score(result["rotation_score"]),
+        "edging": _ceil_score(result["edging_score"]),
+    }
+    score_windows = build_score_windows(score_timeline)
+    payload = {
+        "final_scores": final_scores,
+        "run_parts": _build_prompt_segments(score_windows),
+        "duration_seconds": int(round(float(result.get("duration") or 0))),
+        "turns": int(result.get("turns") or 0),
+        "score_scale": "60-129 Emerging, 130-169 Developing, 170-199 Proficient, 200-240 Excellent",
+        "coaching_factor_labels": COACHING_FACTOR_LABELS,
+    }
+    if context:
+        payload.update({
+            "user_name": context.get("user_name"),
+            "attempt_number": context.get("attempt_number"),
+            "session_date": context.get("session_date"),
+        })
+
+    sections = _generate_openai_sections(payload, use_openai=use_openai)
+    output_path = result["output_path"]
+    report_path = os.path.splitext(output_path)[0] + "_report.pdf"
+    _draw_pdf_report(report_path, payload, sections)
+
+    report_text = "\n\n".join(
+        [
+            f"Overall: {_clean_report_text(sections['overall'])}",
+            *[
+                f"{name.title()}: {_coerce_text(section.get('summary'))} {_coerce_text(section.get('coaching_focus'))}".strip()
+                for name, section in sections["pillars"].items()
+            ],
+            "Improvement Areas: " + " ".join(_clean_report_text(item) for item in sections["improvement_areas"]),
+        ]
+    )
+
+    return {
+        "report_text": report_text,
+        "report_path": report_path,
+        "score_windows": score_windows,
+        "report_sections": sections,
+    }

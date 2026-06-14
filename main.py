@@ -4,16 +4,17 @@ from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
 import shutil
 import os
+from datetime import date
 
 # Local imports
-from database import Base, engine, get_db, SessionLocal
+from database import Base, engine, ensure_database_schema, get_db, SessionLocal
 from models.person import Person
 from models.video_analysis import VideoAnalysis
 from schemas.person import PersonIDName
 import crud.person as person_crud
 import crud.video_analysis as video_crud
 from services.new_analysis import analyze_video
-from routes import video_analysis, person, app_routes
+from routes import video_analysis, person, app_routes, users
 import threading
 from services.file_watcher import start_watching
 from typing import Optional, List
@@ -21,6 +22,7 @@ from typing import Optional, List
 
 # Create DB tables
 Base.metadata.create_all(bind=engine)
+ensure_database_schema()
 
 # FastAPI app instance
 app = FastAPI(
@@ -45,6 +47,7 @@ app.mount("/outputs", StaticFiles(directory="outputs"), name="outputs")
 # Include route modules
 app.include_router(video_analysis.router)
 app.include_router(person.router)
+app.include_router(users.router)
 app.include_router(app_routes.router)
 
 
@@ -53,16 +56,6 @@ app.include_router(app_routes.router)
 #     watcher_thread = threading.Thread(target=start_watching, daemon=True)
 #     watcher_thread.start()
 
-
-persons = person_crud.get_all_persons_id_name(SessionLocal())
-
-def format_persons(persons):
-    formatted = []
-    for person_id, name in persons:
-        formatted.append(f"ID:{person_id} Name:{name}")
-    return formatted
-
-persons = format_persons(persons)
 
 # Custom endpoint: Get ID and Name of all persons
 @app.get("/all", response_model=List[PersonIDName])
@@ -144,9 +137,22 @@ async def analyze_ski_video_react_overlay(
 
 @app.post("/analyze-premium-overlay/")
 async def analyze_ski_video_premium_overlay(
+    user_id: int = Form(...),
     display_mode: str = Form("athlete"),
-    file: UploadFile = File(...)
+    report: bool = Form(False),
+    file: UploadFile = File(...),
 ):
+    read_db = SessionLocal()
+    try:
+        db_user = person_crud.get_person(read_db, user_id)
+        if not db_user:
+            raise HTTPException(status_code=404, detail="User not found")
+        user_name = db_user.name
+        attempt_number = video_crud.get_next_attempt_number(read_db, user_id)
+    finally:
+        read_db.close()
+
+    session_date = date.today().isoformat()
     os.makedirs("temp_videos", exist_ok=True)
     file_location = f"temp_videos/{file.filename}"
 
@@ -154,8 +160,56 @@ async def analyze_ski_video_premium_overlay(
         shutil.copyfileobj(file.file, f)
     file.file.close()
 
-    results = analyze_video(file_location, display_mode=display_mode, overlay_renderer="premium")
+    results = analyze_video(
+        file_location,
+        display_mode=display_mode,
+        overlay_renderer="premium",
+        report=report,
+        user_name=user_name,
+        attempt_number=attempt_number,
+        session_date=session_date,
+    )
     if "output_path" in results:
         results["video_url"] = f"/outputs/{os.path.basename(results['output_path'])}"
+    if "report_path" in results:
+        results["report_url"] = f"/outputs/{os.path.basename(results['report_path'])}"
+    blue_iq_score = (
+        results["pressure_score"]
+        + results["balance_score"]
+        + results["rotation_score"]
+        + results["edging_score"]
+    ) / 4
+    write_db = SessionLocal()
+    try:
+        attempt = VideoAnalysis(
+            person_id=user_id,
+            attempt_number=attempt_number,
+            video_name=file.filename,
+            video_link=results.get("video_url"),
+            input_video_path=file_location,
+            output_video_path=results.get("output_path"),
+            report_path=results.get("report_path"),
+            display_mode=display_mode,
+            overlay_renderer="premium",
+            blue_iq_score=blue_iq_score,
+            pressure_score=results["pressure_score"],
+            balance_score=results["balance_score"],
+            rotation_score=results["rotation_score"],
+            edging_score=results["edging_score"],
+            turns=results.get("turns"),
+            duration=results.get("duration"),
+            status="completed",
+        )
+        write_db.add(attempt)
+        write_db.commit()
+        write_db.refresh(attempt)
+        results["attempt_id"] = attempt.id
+    finally:
+        write_db.close()
+
+    results["attempt_number"] = attempt_number
+    results["session_date"] = session_date
+    results["user_id"] = user_id
+    results["user_name"] = user_name
 
     return results

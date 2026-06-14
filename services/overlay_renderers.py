@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+from datetime import date, datetime
 
 import cv2
 import numpy as np
@@ -593,6 +594,77 @@ def _load_font(size, bold=False):
     return ImageFont.load_default()
 
 
+def _load_session_font(size):
+    if ImageFont is None:
+        return None
+    candidates = [
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+        "C:/Windows/Fonts/arialbd.ttf",
+        "C:/Windows/Fonts/segoeuib.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "LiberationSans-Bold.ttf",
+        "arialbd.ttf",
+    ]
+    for path in candidates:
+        try:
+            return ImageFont.truetype(path, size)
+        except Exception:
+            continue
+    return _load_font(size, bold=True)
+
+
+def _format_session_date(session_date):
+    if not session_date:
+        return None
+    if isinstance(session_date, datetime):
+        value = session_date.date()
+    elif isinstance(session_date, date):
+        value = session_date
+    else:
+        text = str(session_date).strip()
+        try:
+            value = datetime.fromisoformat(text).date()
+        except ValueError:
+            return text
+    return f"{value.strftime('%B')} {value.day}, {value.year}"
+
+
+def _draw_video_session_label_pillow(draw, athlete_name, attempt_number=None, session_date=None):
+    if not athlete_name:
+        return
+
+    name_font = _load_session_font(30)
+    meta_font = _load_session_font(12)
+    x = 24
+    name_y = 22
+    name = str(athlete_name).strip()
+
+    draw.text((x + 2, name_y + 2), name, fill=(0, 0, 0), font=name_font)
+    draw.text((x, name_y), name, fill=(255, 255, 255), font=name_font)
+
+    bbox = draw.textbbox((x, name_y), name, font=name_font)
+    name_baseline = bbox[3]
+    line_y = name_baseline + 6
+    draw.rectangle((x, line_y, x + 36, line_y + 3), fill=(106, 175, 255))
+
+    meta_y = line_y + 13
+    cursor_x = x
+    if attempt_number:
+        attempt_text = f"RUN {attempt_number}"
+        draw.text((cursor_x, meta_y), attempt_text, fill=(106, 175, 255), font=meta_font)
+        cursor_x += int(draw.textlength(attempt_text, font=meta_font)) + 10
+
+    formatted_date = _format_session_date(session_date)
+    if attempt_number and formatted_date:
+        dot_cx = cursor_x + 2
+        dot_cy = meta_y + 8
+        draw.ellipse((dot_cx - 2, dot_cy - 2, dot_cx + 2, dot_cy + 2), fill=(100, 110, 120))
+        cursor_x += 12
+
+    if formatted_date:
+        draw.text((cursor_x, meta_y), formatted_date, fill=(160, 175, 190), font=meta_font)
+
+
 def _premium_metric_bar(draw, label, score, x, y, width, colors, fonts):
     score = _clamp_score(score)
     tier_label, tier_color_bgr = _score_tier(score)
@@ -615,7 +687,18 @@ def _premium_metric_bar(draw, label, score, x, y, width, colors, fonts):
     draw.text((bar_x, y + 42), tier_label.upper(), fill=colors["muted_dark"], font=fonts["tiny"])
 
 
-def create_premium_overlay(frame, metrics, frame_number, TARGET_WIDTH, logo_path=None, display_mode="coach"):
+def create_premium_overlay(
+    frame,
+    metrics,
+    frame_number,
+    TARGET_WIDTH,
+    logo_path=None,
+    display_mode="coach",
+    athlete_name=None,
+    attempt_number=None,
+    session_date=None,
+    user_name=None,
+):
     """Render a dark modern burned-in sidebar using Pillow.
 
     Layout (720px sidebar, 720px frame height):
@@ -640,6 +723,7 @@ def create_premium_overlay(frame, metrics, frame_number, TARGET_WIDTH, logo_path
     canvas = Image.new("RGB", (TARGET_WIDTH + sidebar_width, frame_height), (10, 14, 26))
     canvas.paste(video_img, (0, 0))
     draw = ImageDraw.Draw(canvas)
+    _draw_video_session_label_pillow(draw, athlete_name or user_name, attempt_number, session_date)
 
     # ── COLOR PALETTE ────────────────────────────────────────────────────────
     C = {

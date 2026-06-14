@@ -1,4 +1,4 @@
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 import os
@@ -7,8 +7,14 @@ from sqlalchemy.pool import QueuePool
 
 
 load_dotenv()
-# Update with your MySQL credentials
-SQLALCHEMY_DATABASE_URL = os.getenv("POSTGRE_SQL")
+SQLALCHEMY_DATABASE_URL = (
+    os.getenv("DATABASE_URL")
+    or os.getenv("NEON_DATABASE_URL")
+    or os.getenv("POSTGRE_SQL")
+)
+
+if not SQLALCHEMY_DATABASE_URL:
+    raise RuntimeError("Database URL is missing. Set DATABASE_URL, NEON_DATABASE_URL, or POSTGRE_SQL in .env")
 
 
 
@@ -24,12 +30,36 @@ engine = create_engine(
     connect_args={
         "sslmode": "require",
         "connect_timeout": 30,
-        "application_name": "ai-booking-agent"
+        "application_name": "ski-analysis-platform"
     }
 )
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
+
+
+def ensure_database_schema():
+    """Add new app columns to existing tables without dropping user data."""
+    statements = [
+        "ALTER TABLE persons ADD COLUMN IF NOT EXISTS phone_number VARCHAR(20)",
+        "ALTER TABLE persons ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+        "ALTER TABLE persons ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+        "ALTER TABLE video_analysis ADD COLUMN IF NOT EXISTS attempt_number INTEGER",
+        "ALTER TABLE video_analysis ADD COLUMN IF NOT EXISTS display_mode VARCHAR(50)",
+        "ALTER TABLE video_analysis ADD COLUMN IF NOT EXISTS overlay_renderer VARCHAR(50)",
+        "ALTER TABLE video_analysis ADD COLUMN IF NOT EXISTS input_video_path VARCHAR(500)",
+        "ALTER TABLE video_analysis ADD COLUMN IF NOT EXISTS output_video_path VARCHAR(500)",
+        "ALTER TABLE video_analysis ADD COLUMN IF NOT EXISTS report_path VARCHAR(500)",
+        "ALTER TABLE video_analysis ADD COLUMN IF NOT EXISTS blue_iq_score FLOAT",
+        "ALTER TABLE video_analysis ADD COLUMN IF NOT EXISTS turns INTEGER",
+        "ALTER TABLE video_analysis ADD COLUMN IF NOT EXISTS duration FLOAT",
+        "ALTER TABLE video_analysis ADD COLUMN IF NOT EXISTS status VARCHAR(50)",
+        "ALTER TABLE video_analysis ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+        "ALTER TABLE video_analysis ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+    ]
+    with engine.begin() as connection:
+        for statement in statements:
+            connection.execute(text(statement))
 
 
 

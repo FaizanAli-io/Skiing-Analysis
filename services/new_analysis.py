@@ -6,6 +6,7 @@ import mediapipe as mp
 import logging
 import os
 import time
+from datetime import date
 from typing import Dict, Any, Optional, Tuple, List
 
 # Configure logging
@@ -42,8 +43,25 @@ metrices = {
 }
 
 from services.overlay_renderers import create_overlay, create_premium_overlay, get_unique_output_path, write_react_overlay_page
+from services.report_generator import generate_basic_report
 
-def analyze_video(video_path: str, display_mode: str = "coach", overlay_renderer: str = "opencv") -> Dict[str, Any]:
+
+def _safe_filename_part(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    text = "".join(ch if ch.isalnum() else "_" for ch in text)
+    text = "_".join(part for part in text.split("_") if part)
+    return text or "unknown"
+
+
+def analyze_video(
+    video_path: str,
+    display_mode: str = "coach",
+    overlay_renderer: str = "opencv",
+    report: bool = False,
+    user_name: Optional[str] = None,
+    attempt_number: Optional[int] = None,
+    session_date: Optional[str] = None,
+) -> Dict[str, Any]:
     """Analyze ski video and return performance metrics"""
     logger.info(f"Starting video analysis for: {video_path}")
     display_mode = display_mode.lower().strip()
@@ -58,6 +76,8 @@ def analyze_video(video_path: str, display_mode: str = "coach", overlay_renderer
     if not os.path.exists(video_path):
         logger.error(f"Video file does not exist: {video_path}")
         raise FileNotFoundError(f"Video file not found: {video_path}")
+
+    session_date = session_date or date.today().isoformat()
     
     try:
         # Load YOLO model
@@ -115,7 +135,18 @@ def analyze_video(video_path: str, display_mode: str = "coach", overlay_renderer
         os.makedirs(outputs_dir, exist_ok=True)
         logger.info(f"Output directory: {outputs_dir}")
 
-        base_name = os.path.splitext(os.path.basename(video_path))[0]
+        original_base_name = os.path.splitext(os.path.basename(video_path))[0]
+        if user_name or attempt_number:
+            context_parts = []
+            if user_name:
+                context_parts.append(_safe_filename_part(user_name))
+            if attempt_number:
+                context_parts.append(f"attempt_{attempt_number}")
+            context_parts.append(_safe_filename_part(session_date))
+            context_parts.append(_safe_filename_part(original_base_name))
+            base_name = "_".join(context_parts)
+        else:
+            base_name = original_base_name
         output_variant = None if overlay_renderer == "opencv" else overlay_renderer
         output_path = get_unique_output_path(outputs_dir, base_name, display_mode, variant=output_variant)
         logger.info(f"Output video path: {output_path}")
@@ -189,6 +220,7 @@ def analyze_video(video_path: str, display_mode: str = "coach", overlay_renderer
         skiAngle2_score = []
         pressure_speed_score = []
         pressure_angle_score = []
+        score_timeline = []
 
         # Detect optimal rotation angle - person should be vertical/upright
         logger.info("Detecting optimal rotation angle using nose-above-feet test...")
@@ -298,6 +330,7 @@ def analyze_video(video_path: str, display_mode: str = "coach", overlay_renderer
 
                 detected_people = []
                 ski_boxes = []
+                biomech_body_points = None
 
                 detected_people, ski_boxes, detected_ids = detect_people_and_skis_from_results(results, scores, history)
 
@@ -348,6 +381,17 @@ def analyze_video(video_path: str, display_mode: str = "coach", overlay_renderer
                             # Hips
                             left_hip_x, left_hip_y = int(landmarks[23].x * w), int(landmarks[23].y * h)
                             right_hip_x, right_hip_y = int(landmarks[24].x * w), int(landmarks[24].y * h)
+                            biomech_body_points = {
+                                "navel": (navel_x, navel_y),
+                                "left_foot": (left_foot_x, left_foot_y),
+                                "right_foot": (right_foot_x, right_foot_y),
+                                "left_knee": (left_knee_x, left_knee_y),
+                                "right_knee": (right_knee_x, right_knee_y),
+                                "left_shoulder": (left_shoulder_x, left_shoulder_y),
+                                "right_shoulder": (right_shoulder_x, right_shoulder_y),
+                                "left_hip": (left_hip_x, left_hip_y),
+                                "right_hip": (right_hip_x, right_hip_y),
+                            }
 
                             # Draw pose connections
                             frame = draw_pose_connections(frame, (navel_x, navel_y, left_foot_x, left_foot_y, 
@@ -418,6 +462,7 @@ def analyze_video(video_path: str, display_mode: str = "coach", overlay_renderer
 
                 # Process ski detection
                 flag = False
+                ski_lines = []
                 if ski_boxes:
                     logger.debug(f"Processing {len(ski_boxes)} ski boxes")
                     try:
@@ -460,6 +505,19 @@ def analyze_video(video_path: str, display_mode: str = "coach", overlay_renderer
                         if avg_count != 0:
                             skiAngle = sum(skiAngles[-avg_count:]) / avg_count
                             skiAngles.append(skiAngle)
+
+                if display_mode == "coach" and biomech_body_points:
+                    frame = draw_biomechanics_overlay(
+                        frame,
+                        biomech_body_points,
+                        ski_lines,
+                        {
+                            "ski_separation": skiAngle,
+                            "edge_angle": skiAngle2,
+                            "hip_angle": hipAngle,
+                            "bend_angle": bendAngle,
+                        },
+                    )
 
                 # Calculate scores
                 if skiAngle is not None:
@@ -510,6 +568,19 @@ def analyze_video(video_path: str, display_mode: str = "coach", overlay_renderer
                 metrices["Blue_edging_final"] = Blue_edging_final
                 metrices["Blue_pressure_final"] = Blue_pressure_final
                 metrices["Blue_rotation_final"] = Blue_rotation_final
+                score_timeline.append({
+                    "time_seconds": round(processed_frames / output_fps, 2),
+                    "pressure": Blue_pressure_final,
+                    "balance": Blue_balance_final,
+                    "rotation": Blue_rotation_final,
+                    "edging": Blue_edging_final,
+                    "ski_parallel_control": skiAngle,
+                    "edge_control": skiAngle2,
+                    "upper_body_alignment": hipAngle,
+                    "athletic_stance_knee": kneeAngle,
+                    "athletic_stance_bend": bendAngle,
+                    "transition_control": speed,
+                })
 
                 if processed_frames % 100 == 0:
                     logger.debug(f"Current scores - Edging: {Blue_edging_final:.1f}, "
@@ -527,7 +598,17 @@ def analyze_video(video_path: str, display_mode: str = "coach", overlay_renderer
                         frame = create_overlay(display_frame, metrices, index_counter, TARGET_WIDTH, logo_path, display_mode)
                         out.write(frame)
                     elif overlay_renderer == "premium":
-                        frame = create_premium_overlay(display_frame, metrices, index_counter, TARGET_WIDTH, logo_path, display_mode)
+                        frame = create_premium_overlay(
+                            display_frame,
+                            metrices,
+                            index_counter,
+                            TARGET_WIDTH,
+                            logo_path,
+                            display_mode,
+                            athlete_name=user_name,
+                            attempt_number=attempt_number,
+                            session_date=session_date,
+                        )
                         out.write(frame)
                     else:
                         out.write(display_frame)
@@ -607,11 +688,27 @@ def analyze_video(video_path: str, display_mode: str = "coach", overlay_renderer
             "turns": turns,
             "processed_frames": processed_frames,
             "display_mode": display_mode,
-            "overlay_renderer": overlay_renderer
+            "overlay_renderer": overlay_renderer,
+            "user_name": user_name,
+            "attempt_number": attempt_number,
+            "session_date": session_date,
         }
         if overlay_renderer == "react":
             react_overlay_path = write_react_overlay_page(output_path, result, display_mode)
             result["react_overlay_path"] = react_overlay_path
+        if report:
+            report_result = generate_basic_report(
+                result,
+                score_timeline,
+                context={
+                    "user_name": user_name,
+                    "attempt_number": attempt_number,
+                    "session_date": session_date,
+                },
+            )
+            result["report_text"] = report_result["report_text"]
+            result["report_path"] = report_result["report_path"]
+            result["score_windows"] = report_result["score_windows"]
 
         logger.info("Video analysis completed successfully")
         return result
