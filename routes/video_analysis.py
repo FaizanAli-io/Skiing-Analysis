@@ -12,6 +12,7 @@ from models.person import Person
 from models.video_analysis import VideoAnalysis
 from database import get_db
 from pydantic import BaseModel
+from services.auth import require_admin
 
 
 router = APIRouter(prefix="/videos", tags=["Video Analysis"])
@@ -19,20 +20,20 @@ router = APIRouter(prefix="/videos", tags=["Video Analysis"])
 
 
 @router.get("/{video_id}", response_model=schemas.VideoAnalysisOut)
-def read(video_id: int, db: Session = Depends(get_db)):
+def read(video_id: int, _admin: Person = Depends(require_admin), db: Session = Depends(get_db)):
     db_video = crud.get_video(db, video_id)
     if db_video is None:
         raise HTTPException(status_code=404, detail="Video not found")
     return db_video
 
 @router.get("/", response_model=List[schemas.VideoAnalysisOut])
-def read_all(skip: int = 0, limit: int = 10, db: Session = Depends(get_db)):
+def read_all(skip: int = 0, limit: int = 10, _admin: Person = Depends(require_admin), db: Session = Depends(get_db)):
     return crud.get_all_videos(db, skip, limit)
 
 
 
 @router.delete("/{video_id}")
-def delete(video_id: int, db: Session = Depends(get_db)):
+def delete(video_id: int, _admin: Person = Depends(require_admin), db: Session = Depends(get_db)):
     deleted = crud.delete_video(db, video_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="Video not found")

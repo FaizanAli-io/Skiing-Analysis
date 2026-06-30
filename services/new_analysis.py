@@ -126,7 +126,8 @@ def analyze_video(
         logger.info(f"Original frame dimensions: {frame_width}x{frame_height}")
 
         # Define the codec and create a VideoWriter object
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        # Use H.264 codec for better browser compatibility
+        fourcc = cv2.VideoWriter_fourcc(*'avc1')  # H.264 codec
 
         base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         outputs_dir = os.path.join(base_dir, "outputs")
@@ -221,6 +222,10 @@ def analyze_video(
         pressure_speed_score = []
         pressure_angle_score = []
         score_timeline = []
+        snapshot_path = os.path.splitext(output_path)[0] + "_snapshot.jpg"
+        snapshot_saved = False
+        snapshot_frame_target = max(1, int((total_frames / frame_skip) * 0.5))
+        last_report_frame = None
 
         # Detect optimal rotation angle - person should be vertical/upright
         logger.info("Detecting optimal rotation angle using nose-above-feet test...")
@@ -612,6 +617,15 @@ def analyze_video(
                         out.write(frame)
                     else:
                         out.write(display_frame)
+
+                    if report:
+                        last_report_frame = display_frame
+                    if report and not snapshot_saved and processed_frames >= snapshot_frame_target:
+                        if cv2.imwrite(snapshot_path, last_report_frame):
+                            snapshot_saved = True
+                            logger.info(f"Report technique snapshot saved: {snapshot_path}")
+                        else:
+                            logger.warning(f"Unable to save report technique snapshot: {snapshot_path}")
                 except Exception as e:
                     logger.error(f"Error creating overlay or writing frame: {e}")
                     # Write original frame if overlay fails
@@ -636,6 +650,12 @@ def analyze_video(
             frame_count += 1
 
         logger.info(f"Video processing completed. Total frames processed: {processed_frames}")
+        if report and not snapshot_saved and last_report_frame is not None:
+            if cv2.imwrite(snapshot_path, last_report_frame):
+                snapshot_saved = True
+                logger.info(f"Fallback report technique snapshot saved: {snapshot_path}")
+            else:
+                logger.warning(f"Unable to save fallback report technique snapshot: {snapshot_path}")
 
     except Exception as e:
         logger.error(f"Error during video processing: {e}")
@@ -693,6 +713,8 @@ def analyze_video(
             "attempt_number": attempt_number,
             "session_date": session_date,
         }
+        if 'snapshot_path' in locals() and snapshot_saved and os.path.exists(snapshot_path):
+            result["snapshot_path"] = snapshot_path
         if overlay_renderer == "react":
             react_overlay_path = write_react_overlay_page(output_path, result, display_mode)
             result["react_overlay_path"] = react_overlay_path

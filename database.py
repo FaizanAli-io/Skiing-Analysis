@@ -42,6 +42,9 @@ def ensure_database_schema():
     """Add new app columns to existing tables without dropping user data."""
     statements = [
         "ALTER TABLE persons ADD COLUMN IF NOT EXISTS phone_number VARCHAR(20)",
+        "ALTER TABLE persons ADD COLUMN IF NOT EXISTS password_hash VARCHAR(255)",
+        "ALTER TABLE persons ADD COLUMN IF NOT EXISTS role VARCHAR(20) DEFAULT 'client'",
+        "ALTER TABLE persons ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE",
         "ALTER TABLE persons ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
         "ALTER TABLE persons ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
         "ALTER TABLE video_analysis ADD COLUMN IF NOT EXISTS attempt_number INTEGER",
@@ -56,6 +59,11 @@ def ensure_database_schema():
         "ALTER TABLE video_analysis ADD COLUMN IF NOT EXISTS status VARCHAR(50)",
         "ALTER TABLE video_analysis ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
         "ALTER TABLE video_analysis ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+        "ALTER TABLE video_analysis ADD COLUMN IF NOT EXISTS s3_video_key VARCHAR(500)",
+        "ALTER TABLE video_analysis ADD COLUMN IF NOT EXISTS s3_report_key VARCHAR(500)",
+        "ALTER TABLE video_analysis ADD COLUMN IF NOT EXISTS s3_snapshot_key VARCHAR(500)",
+        "UPDATE persons SET role = 'client' WHERE role IS NULL",
+        "UPDATE persons SET is_active = TRUE WHERE is_active IS NULL",
     ]
     with engine.begin() as connection:
         for statement in statements:

@@ -8,6 +8,8 @@ class PersonCreate(BaseModel):
 
 class PersonOut(PersonCreate):
     id: int
+    role: Optional[str] = "client"
+    is_active: Optional[bool] = True
 
     class Config:
         from_attributes = True

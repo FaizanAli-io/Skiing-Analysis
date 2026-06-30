@@ -8,6 +8,7 @@ from models.person import Person
 from models.video_analysis import VideoAnalysis
 from database import get_db
 from pydantic import BaseModel
+from services.auth import require_admin
 router = APIRouter(prefix="/app", tags=["App-Data"])
 
 
@@ -35,6 +36,7 @@ from fastapi import Form
 def get_app_data(
     before: Optional[date] = Form(None),
     after: Optional[date] = Form(None),
+    _admin: Person = Depends(require_admin),
     db: Session = Depends(get_db)
 ):
     if before is None and after is None:

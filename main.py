@@ -14,15 +14,48 @@ from schemas.person import PersonIDName
 import crud.person as person_crud
 import crud.video_analysis as video_crud
 from services.new_analysis import analyze_video
-from routes import video_analysis, person, app_routes, users
+from routes import admin_portal, app_routes, auth, client_portal, person, users, video_analysis
 import threading
 from services.file_watcher import start_watching
 from typing import Optional, List
+from services.auth import hash_password, require_admin
+from services.aws_s3 import S3Manager, upload_analysis_files
 
 
 # Create DB tables
 Base.metadata.create_all(bind=engine)
 ensure_database_schema()
+
+
+def ensure_default_admin():
+    admin_email = os.getenv("DEFAULT_ADMIN_EMAIL")
+    admin_password = os.getenv("DEFAULT_ADMIN_PASSWORD")
+    if not admin_email or not admin_password:
+        return
+
+    db = SessionLocal()
+    try:
+        email = admin_email.strip().lower()
+        existing = db.query(Person).filter(Person.email == email).first()
+        if existing:
+            if existing.role != "admin":
+                existing.role = "admin"
+                db.commit()
+            return
+        admin = Person(
+            name=os.getenv("DEFAULT_ADMIN_NAME", "Bluerun Admin"),
+            email=email,
+            password_hash=hash_password(admin_password),
+            role="admin",
+            is_active=True,
+        )
+        db.add(admin)
+        db.commit()
+    finally:
+        db.close()
+
+
+ensure_default_admin()
 
 # FastAPI app instance
 app = FastAPI(
@@ -48,6 +81,9 @@ app.mount("/outputs", StaticFiles(directory="outputs"), name="outputs")
 app.include_router(video_analysis.router)
 app.include_router(person.router)
 app.include_router(users.router)
+app.include_router(auth.router)
+app.include_router(admin_portal.router)
+app.include_router(client_portal.router)
 app.include_router(app_routes.router)
 
 
@@ -59,7 +95,10 @@ app.include_router(app_routes.router)
 
 # Custom endpoint: Get ID and Name of all persons
 @app.get("/all", response_model=List[PersonIDName])
-def get_all_persons_id_name(db: Session = Depends(get_db)):
+def get_all_persons_id_name(
+    _admin: Person = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
     return person_crud.get_all_persons_id_name(db)
 
 # Video upload and analysis endpoint
@@ -67,7 +106,8 @@ def get_all_persons_id_name(db: Session = Depends(get_db)):
 async def analyze_ski_video(
     person_id: Optional[str] = Form(None),
     display_mode: str = Form("coach"),
-    file: UploadFile = File(...)
+    file: UploadFile = File(...),
+    current_admin: Person = Depends(require_admin),
 ):
     os.makedirs("temp_videos", exist_ok=True)
     file_location = f"temp_videos/{file.filename}"
@@ -117,7 +157,8 @@ async def analyze_ski_video(
 @app.post("/analyze-react-overlay/")
 async def analyze_ski_video_react_overlay(
     display_mode: str = Form("athlete"),
-    file: UploadFile = File(...)
+    file: UploadFile = File(...),
+    current_admin: Person = Depends(require_admin),
 ):
     os.makedirs("temp_videos", exist_ok=True)
     file_location = f"temp_videos/{file.filename}"
@@ -141,6 +182,7 @@ async def analyze_ski_video_premium_overlay(
     display_mode: str = Form("athlete"),
     report: bool = Form(False),
     file: UploadFile = File(...),
+    current_admin: Person = Depends(require_admin),
 ):
     read_db = SessionLocal()
     try:
@@ -169,10 +211,35 @@ async def analyze_ski_video_premium_overlay(
         attempt_number=attempt_number,
         session_date=session_date,
     )
-    if "output_path" in results:
+    
+    # Upload to S3 if enabled
+    s3_video_url = None
+    s3_report_url = None
+    s3_snapshot_url = None
+    s3_uploads = {}
+    
+    if S3Manager.is_enabled():
+        s3_uploads = upload_analysis_files(
+            video_path=results.get("output_path"),
+            report_path=results.get("report_path"),
+            snapshot_path=results.get("snapshot_path")
+        )
+        s3_video_url = s3_uploads.get("video_url")
+        s3_report_url = s3_uploads.get("report_url")
+        s3_snapshot_url = s3_uploads.get("snapshot_url")
+        
+        # Use S3 URLs if available
+        if s3_video_url:
+            results["video_url"] = s3_video_url
+        if s3_report_url:
+            results["report_url"] = s3_report_url
+    
+    # Fallback to local URLs if S3 not enabled
+    if not s3_video_url and "output_path" in results:
         results["video_url"] = f"/outputs/{os.path.basename(results['output_path'])}"
-    if "report_path" in results:
+    if not s3_report_url and "report_path" in results:
         results["report_url"] = f"/outputs/{os.path.basename(results['report_path'])}"
+    
     blue_iq_score = (
         results["pressure_score"]
         + results["balance_score"]
@@ -185,10 +252,13 @@ async def analyze_ski_video_premium_overlay(
             person_id=user_id,
             attempt_number=attempt_number,
             video_name=file.filename,
-            video_link=results.get("video_url"),
+            video_link=results.get("video_url"),  # S3 presigned URL or local URL
             input_video_path=file_location,
-            output_video_path=results.get("output_path"),
-            report_path=results.get("report_path"),
+            output_video_path=results.get("output_path"),  # Local path
+            report_path=s3_report_url if s3_report_url else results.get("report_path"),  # S3 URL or local path
+            s3_video_key=s3_uploads.get("video_s3_key") if S3Manager.is_enabled() else None,
+            s3_report_key=s3_uploads.get("report_s3_key") if S3Manager.is_enabled() else None,
+            s3_snapshot_key=s3_uploads.get("snapshot_s3_key") if S3Manager.is_enabled() else None,
             display_mode=display_mode,
             overlay_renderer="premium",
             blue_iq_score=blue_iq_score,

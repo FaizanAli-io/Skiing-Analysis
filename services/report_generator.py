@@ -54,6 +54,126 @@ PILLAR_GUIDANCE = {
     "edging": "Edging reflects edge engagement, ski parallel control, and ability to hold a clean arc.",
 }
 
+BLUEIQ_LEVEL_GUIDE = (
+    {
+        "level": 1,
+        "name": "Getting Started",
+        "category": "Beginner",
+        "low": 60,
+        "high": 80,
+        "status": "First-time skier building comfort on skis.",
+        "key_focus": "Build equipment familiarity, basic movement, safe sliding, wedge turns, stopping, falling, and getting up.",
+        "interpretations": (
+            (60, 70, "Needs guidance in basic balance and movement."),
+            (71, 80, "Demonstrates improved control over movement, turning, and stopping."),
+        ),
+    },
+    {
+        "level": 2,
+        "name": "Building Confidence",
+        "category": "Beginner",
+        "low": 81,
+        "high": 100,
+        "status": "Ready to add new skills with more comfort on skis.",
+        "key_focus": "Develop foot tilting for turns, speed and direction control, linking S-turns, and dynamic movement.",
+        "interpretations": (
+            (81, 90, "Can consistently perform gliding wedge turns but needs refinement."),
+            (91, 100, "Links turns smoothly with improved balance and speed control."),
+        ),
+    },
+    {
+        "level": 3,
+        "name": "Developing Control",
+        "category": "Intermediate",
+        "low": 101,
+        "high": 120,
+        "status": "Learning to ski with more control and confidence.",
+        "key_focus": "Improve gliding wedge and wedge christie turns, parallel ski matching at the end of turns, and speed management.",
+        "interpretations": (
+            (101, 110, "Beginning parallel skiing while still using a wedge for support."),
+            (111, 120, "Achieves more confident parallel turns and controls speed more effectively."),
+        ),
+    },
+    {
+        "level": 4,
+        "name": "Finding Fluidity",
+        "category": "Intermediate",
+        "low": 121,
+        "high": 140,
+        "status": "Skiing with smoother and more fluid movement.",
+        "key_focus": "Develop wedge christie turns, side slipping, hockey-stop control, edge control, and pressure management.",
+        "interpretations": (
+            (121, 130, "Executes intermediate wedge christie turns and basic side slipping."),
+            (131, 140, "Consistently moves toward parallel turns by mid-turn with better stopping control."),
+        ),
+    },
+    {
+        "level": 5,
+        "name": "Building Rhythm",
+        "category": "Intermediate",
+        "low": 141,
+        "high": 160,
+        "status": "Building rhythm and flow.",
+        "key_focus": "Begin turns with parallel skis, add pole touches, improve edge engagement, and navigate uneven surfaces.",
+        "interpretations": (
+            (141, 150, "Shows better wedge christie control while speed refinement is still needed."),
+            (151, 160, "Shows stronger parallel control with better balance and edge use."),
+        ),
+    },
+    {
+        "level": 6,
+        "name": "Parallel Precision",
+        "category": "Intermediate",
+        "low": 161,
+        "high": 180,
+        "status": "Skiing fully parallel with more control.",
+        "key_focus": "Refine edged and steered parallel turns, speed management, turn shape, and adaptation to terrain and snow surface.",
+        "interpretations": (
+            (161, 170, "Shows consistent parallel turns with growing versatility."),
+            (171, 180, "Shows strong ability to adjust turn shape and speed."),
+        ),
+    },
+    {
+        "level": 7,
+        "name": "Terrain Tactics",
+        "category": "Proficient",
+        "low": 181,
+        "high": 200,
+        "status": "Training for real-mountain conditions.",
+        "key_focus": "Develop short-radius turns, tactical decision-making, and clearer separation between pivoting and edging.",
+        "interpretations": (
+            (181, 190, "Shows early tactical decision-making and developing short-radius turn control."),
+            (191, 200, "Shows stronger short-turn mastery, control, and speed adaptability."),
+        ),
+    },
+    {
+        "level": 8,
+        "name": "Intentional Skiing",
+        "category": "Expert",
+        "low": 201,
+        "high": 220,
+        "status": "Skiing with purpose and intention.",
+        "key_focus": "Use ski tilting as the primary turning mechanism, refine advanced turn entries, and adapt tactics to speed and terrain.",
+        "interpretations": (
+            (201, 210, "Shows strong technical control while alternative turn entries still need refinement."),
+            (211, 220, "Executes turns with mastery and adapts tactics well."),
+        ),
+    },
+    {
+        "level": 9,
+        "name": "Mastery and Flow",
+        "category": "Expert",
+        "low": 221,
+        "high": 240,
+        "status": "Mastering all conditions with skill and strategy.",
+        "key_focus": "Refine high-speed short and long-radius turns, tactical decisions, and performance across steeps, gates, bumps, powder, and carved turns.",
+        "interpretations": (
+            (221, 230, "Shows strong mastery of high-speed turns with minor refinements needed."),
+            (231, 240, "Shows elite-level execution across technical demands."),
+        ),
+    },
+)
+
 APPROVED_COACHING_CUES = {
     "pressure": {
         "emerging": "Build a smoother pressure release so the skier is not forced back at the end of the turn.",
@@ -118,6 +238,50 @@ def _approved_improvement_areas(scores: Dict[str, Any], limit: int = 3) -> List[
         key=lambda item: item[1],
     )
     return [_approved_cue(pillar, score) for pillar, score in ranked[:limit]]
+
+
+def _blueiq_level_guide(score: float) -> Dict[str, Any]:
+    rounded = _ceil_score(score)
+    for guide in BLUEIQ_LEVEL_GUIDE:
+        if guide["low"] <= rounded <= guide["high"]:
+            return dict(guide)
+    if rounded < BLUEIQ_LEVEL_GUIDE[0]["low"]:
+        return dict(BLUEIQ_LEVEL_GUIDE[0])
+    return dict(BLUEIQ_LEVEL_GUIDE[-1])
+
+
+def _blueiq_score_interpretation(score: float, guide: Dict[str, Any]) -> str:
+    rounded = _ceil_score(score)
+    for low, high, text in guide.get("interpretations", ()):
+        if low <= rounded <= high:
+            return text
+    return guide.get("status", "")
+
+
+def _report_level_context(score: float) -> Dict[str, Any]:
+    guide = _blueiq_level_guide(score)
+    return {
+        "category": guide["category"],
+        "level": guide["level"],
+        "name": guide["name"],
+        "score_range": f"{guide['low']}-{guide['high']}",
+        "status": guide["status"],
+        "key_focus": guide["key_focus"],
+        "score_interpretation": _blueiq_score_interpretation(score, guide),
+    }
+
+
+def _level_context_sentence(payload: Dict[str, Any]) -> str:
+    level = payload.get("blueiq_level") or _report_level_context(payload["final_scores"]["blue_iq"])
+    return (
+        f"Blue IQ places this skier at {level['category']} Level {level['level']}: "
+        f"{level['name']}. {level['score_interpretation']}"
+    )
+
+
+def _level_focus_cue(payload: Dict[str, Any]) -> str:
+    level = payload.get("blueiq_level") or _report_level_context(payload["final_scores"]["blue_iq"])
+    return f"Current BlueIQ level focus: {level['key_focus']}"
 
 
 def _safe_average(values: List[float]) -> Optional[float]:
@@ -358,7 +522,16 @@ def _apply_approved_cues(sections: Dict[str, Any], payload: Dict[str, Any]) -> D
     for pillar in ("pressure", "balance", "rotation", "edging"):
         pillar_section = pillars.setdefault(pillar, {})
         pillar_section["coaching_focus"] = _approved_cue(pillar, scores[pillar])
-    sections["improvement_areas"] = _approved_improvement_areas(scores)
+    overall = _clean_report_text(sections.get("overall"))
+    level_sentence = _level_context_sentence(payload)
+    if "Level" not in overall and "Blue IQ places" not in overall:
+        sections["overall"] = f"{level_sentence} {overall}".strip()
+    else:
+        sections["overall"] = overall
+    sections["improvement_areas"] = [
+        _level_focus_cue(payload),
+        *_approved_improvement_areas(scores),
+    ][:4]
     return _clean_sections(sections)
 
 
@@ -417,8 +590,9 @@ def _fallback_sections(payload: Dict[str, Any]) -> Dict[str, Any]:
 
     return _apply_approved_cues({
         "overall": (
+            f"{_level_context_sentence(payload)} "
             f"The skier finished with a Blue IQ of {scores['blue_iq']:.0f}/240, "
-            f"which is currently {_score_band(scores['blue_iq']).lower()}. "
+            f"which is currently {_score_band(scores['blue_iq']).lower()} on the score band scale. "
             f"The strongest pillar was {strongest} at {strongest_score:.0f}/240, while "
             f"{weakest} needs the most attention at {weakest_score:.0f}/240."
         ),
@@ -468,6 +642,8 @@ def _generate_openai_sections(payload: Dict[str, Any], use_openai: bool = True) 
         "overall must be a single string, not an object. improvement_areas must be an array of strings. "
         "pillars must contain pressure, balance, rotation, edging. Each pillar must contain "
         "summary and coaching_focus as strings. Use final scores and run segment data. "
+        "Use approved_blueiq_level as the official source for the skier's current level, status, "
+        "score meaning, and next focus. "
         "Do not invent coaching advice. coaching_focus will be replaced by approved Bluerun cues. "
         "Use coaching_focus only as a brief observation, not a technical instruction. "
         "Use integer scores only. Never write decimals. "
@@ -585,6 +761,32 @@ def _draw_pillar_card(draw, x: int, y: int, w: int, h: int, name: str, score: fl
     _draw_wrapped(draw, body, x + 28, y + 122, w - 56, fonts["small"], (180, 196, 218), line_gap=5, max_lines=4)
 
 
+def _draw_snapshot_card(canvas: Image.Image, draw, x: int, y: int, w: int, h: int, snapshot_path: str, fonts: Dict[str, Any]) -> None:
+    draw.rounded_rectangle((x, y, x + w, y + h), radius=28, fill=(10, 24, 42), outline=(34, 54, 82), width=2)
+    draw.text((x + 28, y + 26), "Technique Snapshot", fill=(238, 246, 255), font=fonts["section"])
+
+    if not snapshot_path or not os.path.exists(snapshot_path):
+        draw.text((x + 28, y + 88), "Snapshot unavailable", fill=(150, 169, 194), font=fonts["body"])
+        return
+
+    try:
+        image = Image.open(snapshot_path).convert("RGB")
+        image.thumbnail((w - 56, h - 98), Image.LANCZOS)
+        image_x = x + (w - image.width) // 2
+        image_y = y + 76 + max(0, (h - 98 - image.height) // 2)
+        draw.rounded_rectangle(
+            (image_x - 3, image_y - 3, image_x + image.width + 3, image_y + image.height + 3),
+            radius=16,
+            fill=(4, 12, 24),
+            outline=(34, 69, 110),
+            width=2,
+        )
+        canvas.paste(image, (image_x, image_y))
+    except Exception as exc:
+        logger.error(f"Unable to draw report snapshot: {exc}")
+        draw.text((x + 28, y + 88), "Snapshot unavailable", fill=(150, 169, 194), font=fonts["body"])
+
+
 def _draw_pdf_report(report_path: str, payload: Dict[str, Any], sections: Dict[str, Any]) -> None:
     if Image is None:
         raise RuntimeError("Pillow is required to generate PDF reports")
@@ -612,27 +814,40 @@ def _draw_pdf_report(report_path: str, payload: Dict[str, Any], sections: Dict[s
     logo_path = os.path.join(script_dir, "bluerun.png")
     _draw_header(canvas, draw, fonts, logo_path, payload)
 
-    draw.rounded_rectangle((60, 270, 1215, 470), radius=28, fill=(10, 24, 42), outline=(34, 54, 82), width=2)
-    draw.text((92, 302), "Overall Performance", fill=(238, 246, 255), font=fonts["section"])
-    overall_text = _fit_text_to_lines(draw, sections["overall"], fonts["body"], 1090, 4)
-    _draw_wrapped(draw, overall_text, 92, 350, 1090, fonts["body"], (186, 202, 224), line_gap=8, max_lines=4)
+    snapshot_path = payload.get("snapshot_path")
+    has_snapshot = bool(snapshot_path and os.path.exists(snapshot_path))
+    if has_snapshot:
+        draw.rounded_rectangle((60, 270, 715, 570), radius=28, fill=(10, 24, 42), outline=(34, 54, 82), width=2)
+        draw.text((92, 302), "Overall Performance", fill=(238, 246, 255), font=fonts["section"])
+        overall_text = _fit_text_to_lines(draw, sections["overall"], fonts["body"], 595, 6)
+        _draw_wrapped(draw, overall_text, 92, 350, 595, fonts["body"], (186, 202, 224), line_gap=8, max_lines=6)
+        _draw_snapshot_card(canvas, draw, 745, 270, 470, 300, snapshot_path, fonts)
+        cards_start_y = 610
+    else:
+        draw.rounded_rectangle((60, 270, 1215, 470), radius=28, fill=(10, 24, 42), outline=(34, 54, 82), width=2)
+        draw.text((92, 302), "Overall Performance", fill=(238, 246, 255), font=fonts["section"])
+        overall_text = _fit_text_to_lines(draw, sections["overall"], fonts["body"], 1090, 4)
+        _draw_wrapped(draw, overall_text, 92, 350, 1090, fonts["body"], (186, 202, 224), line_gap=8, max_lines=4)
+        cards_start_y = 515
 
     scores = payload["final_scores"]
     pillar_sections = sections["pillars"]
     card_w = 555
-    card_h = 255
-    _draw_pillar_card(draw, 60, 515, card_w, card_h, "Pressure", scores["pressure"], pillar_sections["pressure"], fonts)
-    _draw_pillar_card(draw, 660, 515, card_w, card_h, "Balance", scores["balance"], pillar_sections["balance"], fonts)
-    _draw_pillar_card(draw, 60, 805, card_w, card_h, "Rotation", scores["rotation"], pillar_sections["rotation"], fonts)
-    _draw_pillar_card(draw, 660, 805, card_w, card_h, "Edging", scores["edging"], pillar_sections["edging"], fonts)
+    card_h = 235 if has_snapshot else 255
+    second_row_y = cards_start_y + card_h + 30
+    _draw_pillar_card(draw, 60, cards_start_y, card_w, card_h, "Pressure", scores["pressure"], pillar_sections["pressure"], fonts)
+    _draw_pillar_card(draw, 660, cards_start_y, card_w, card_h, "Balance", scores["balance"], pillar_sections["balance"], fonts)
+    _draw_pillar_card(draw, 60, second_row_y, card_w, card_h, "Rotation", scores["rotation"], pillar_sections["rotation"], fonts)
+    _draw_pillar_card(draw, 660, second_row_y, card_w, card_h, "Edging", scores["edging"], pillar_sections["edging"], fonts)
 
-    draw.rounded_rectangle((60, 1102, 1215, 1494), radius=28, fill=(10, 24, 42), outline=(34, 54, 82), width=2)
-    draw.text((92, 1138), "Improvement Areas", fill=(238, 246, 255), font=fonts["section"])
-    y = 1192
+    improvement_y = second_row_y + card_h + 35
+    draw.rounded_rectangle((60, improvement_y, 1215, 1494), radius=28, fill=(10, 24, 42), outline=(34, 54, 82), width=2)
+    draw.text((92, improvement_y + 36), "Improvement Areas", fill=(238, 246, 255), font=fonts["section"])
+    y = improvement_y + 90
     for index, item in enumerate(sections["improvement_areas"][:4], start=1):
         draw.ellipse((96, y + 7, 116, y + 27), fill=(106, 175, 255))
         draw.text((102, y + 4), str(index), fill=(5, 10, 22), font=fonts["tiny_bold"])
-        y = _draw_wrapped(draw, item, 136, y, 1010, fonts["body"], (186, 202, 224), line_gap=6, max_lines=2) + 12
+        y = _draw_wrapped(draw, item, 136, y, 1010, fonts["body"], (186, 202, 224), line_gap=6, max_lines=1 if has_snapshot else 2) + 12
 
     draw.text((72, 1542), "Score scale: 60-129 Emerging | 130-169 Developing | 170-199 Proficient | 200-240 Excellent", fill=(125, 143, 166), font=fonts["small"])
     footer_parts = [f"Duration: {payload['duration_seconds']} sec"]
@@ -668,9 +883,12 @@ def generate_basic_report(
     score_windows = build_score_windows(score_timeline)
     payload = {
         "final_scores": final_scores,
+        "approved_blueiq_level": _report_level_context(final_scores["blue_iq"]),
+        "blueiq_level": _report_level_context(final_scores["blue_iq"]),
         "run_parts": _build_prompt_segments(score_windows),
         "duration_seconds": int(round(float(result.get("duration") or 0))),
         "turns": int(result.get("turns") or 0),
+        "snapshot_path": result.get("snapshot_path"),
         "score_scale": "60-129 Emerging, 130-169 Developing, 170-199 Proficient, 200-240 Excellent",
         "coaching_factor_labels": COACHING_FACTOR_LABELS,
     }

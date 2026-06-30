@@ -1,65 +1,189 @@
+# ==========================================
+# Environment & Secrets - DO NOT COMMIT
+# ==========================================
+.env
+.env.local
+.env.production
+*.pem
+*.key
+skiing-analysis-key.pem
+
+# ==========================================
 # Python
+# ==========================================
 __pycache__/
 *.py[cod]
 *.egg
 *.egg-info/
 dist/
 build/
+*.so
+.Python
 
-# Environments
-.env
+# ==========================================
+# Virtual Environments
+# ==========================================
+.env/
 .venv/
 env/
 venv/
+ENV/
+env.bak/
+venv.bak/
 
-# Jupyter Notebooks
-.ipynb_checkpoints/
-
+# ==========================================
 # IDEs and Editors
+# ==========================================
 .vscode/
 .idea/
 *.sublime-workspace
 *.sublime-project
+*.swp
+*.swo
+*~
 
-# OS generated files
+# ==========================================
+# OS Generated Files
+# ==========================================
 .DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
 Thumbs.db
+desktop.ini
 
+# ==========================================
 # Logs
+# ==========================================
 *.log
+logs/
+*.log.*
 
-# Cache
-.cache/
-*.bak
-
-# Pytest
-.pytest_cache/
-
-# mypy
-.mypy_cache/
-
-# SQLAlchemy / Alembic migrations (optional)
-migrations/
-
-# FastAPI specific (optional)
-*.db
-temp_videos/
-
-# Ignore YOLOv8 model
-yolov8n.pt
-
-# Ignore all MP4 and MOV video files
+# ==========================================
+# Video Files (Large Files)
+# ==========================================
 *.mp4
 *.MP4
 *.mov
 *.MOV
+*.avi
+*.AVI
+*.mkv
+*.MKV
+*.wmv
+*.WMV
+*.flv
+*.FLV
 
-uploads/*.mp4
-uploads/*.MP4
-uploads/*.mov
-uploads/*.MOV
+# ==========================================
+# Output Folders (Generated Content)
+# ==========================================
+outputs/
+temp_videos/
+uploads/
+prev_output/
 
-outputs/*.mp4
-outputs/*.MP4
-outputs/*.mov
-outputs/*.MOV
+# ==========================================
+# PDF Reports (Large Files)
+# ==========================================
+*.pdf
+outputs/*.pdf
+
+# ==========================================
+# Image Snapshots
+# ==========================================
+*.jpg
+*.jpeg
+*.png
+outputs/*.jpg
+outputs/*.jpeg
+outputs/*.png
+
+# ==========================================
+# AI Models (Large Files)
+# ==========================================
+yolov8n.pt
+yolov8s.pt
+yolov8m.pt
+yolov8l.pt
+yolov8x.pt
+*.pt
+*.pth
+*.onnx
+*.h5
+*.weights
+
+# ==========================================
+# Database Files
+# ==========================================
+*.db
+*.sqlite
+*.sqlite3
+
+# ==========================================
+# Testing & Coverage
+# ==========================================
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# ==========================================
+# Type Checking
+# ==========================================
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pytype/
+
+# ==========================================
+# Jupyter Notebooks
+# ==========================================
+.ipynb_checkpoints/
+*.ipynb
+
+# ==========================================
+# Package Managers
+# ==========================================
+pip-log.txt
+pip-delete-this-directory.txt
+
+# ==========================================
+# Frontend (Node.js)
+# ==========================================
+frontend/node_modules/
+frontend/dist/
+frontend/.env
+frontend/.env.local
+frontend/npm-debug.log*
+frontend/yarn-debug.log*
+frontend/yarn-error.log*
+
+# ==========================================
+# Alembic Migrations (Optional)
+# ==========================================
+# migrations/
+
+# ==========================================
+# AWS & Deployment
+# ==========================================
+.aws/
+*.pem
+deploy_config.json
+
+# ==========================================
+# Cache
+# ==========================================
+.cache/
+*.bak
+*.swp
+
+# ==========================================
+# Miscellaneous
+# ==========================================
+metrices.json
+test_*.txt
+test_*.mp4

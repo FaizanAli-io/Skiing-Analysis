@@ -14,6 +14,9 @@ class VideoAnalysis(Base):
     input_video_path = Column(String(500), nullable=True)
     output_video_path = Column(String(500), nullable=True)
     report_path = Column(String(500), nullable=True)
+    s3_video_key = Column(String(500), nullable=True)  # S3 key for video
+    s3_report_key = Column(String(500), nullable=True)  # S3 key for report
+    s3_snapshot_key = Column(String(500), nullable=True)  # S3 key for snapshot
     display_mode = Column(String(50), nullable=True)
     overlay_renderer = Column(String(50), nullable=True)
 
