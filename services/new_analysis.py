@@ -125,9 +125,9 @@ def analyze_video(
 
         logger.info(f"Original frame dimensions: {frame_width}x{frame_height}")
 
-        # Define the codec and create a VideoWriter object
-        # Use H.264 codec for better browser compatibility
-        fourcc = cv2.VideoWriter_fourcc(*'avc1')  # H.264 codec
+        # Use mp4v for OpenCV's writer (always software-based, no hardware encoder issues).
+        # We transcode to browser-compatible H.264 (libx264) via ffmpeg after writing.
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
 
         base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         outputs_dir = os.path.join(base_dir, "outputs")
@@ -667,6 +667,35 @@ def analyze_video(
         if 'out' in locals():
             out.release()
         logger.info("Video capture and writer resources released")
+        
+        # Transcode to browser-compatible H.264 using libx264 explicitly,
+        # since OpenCV's own fourcc-based encoder selection is unreliable
+        # across platforms (e.g. picks unavailable hardware encoders on EC2).
+        if 'output_path' in locals() and os.path.exists(output_path):
+            import subprocess
+            temp_transcode_path = output_path + ".h264.mp4"
+            try:
+                subprocess.run(
+                    [
+                        "ffmpeg", "-y",
+                        "-i", output_path,
+                        "-c:v", "libx264",
+                        "-preset", "medium",
+                        "-crf", "23",
+                        "-pix_fmt", "yuv420p",
+                        "-movflags", "+faststart",
+                        temp_transcode_path,
+                    ],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+                os.replace(temp_transcode_path, output_path)
+                logger.info(f"Transcoded output video to H.264: {output_path}")
+            except subprocess.CalledProcessError as e:
+                logger.error(f"ffmpeg transcode failed, keeping mp4v output: {e.stderr}")
+            except FileNotFoundError:
+                logger.error("ffmpeg binary not found on PATH, keeping mp4v output")
 
     # Final calculations
     logger.info("Calculating final scores...")

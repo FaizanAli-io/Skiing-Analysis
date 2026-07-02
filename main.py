@@ -240,12 +240,21 @@ async def analyze_ski_video_premium_overlay(
     if not s3_report_url and "report_path" in results:
         results["report_url"] = f"/outputs/{os.path.basename(results['report_path'])}"
     
-    blue_iq_score = (
+    # Convert numpy floats to Python floats for database compatibility
+    blue_iq_score = float((
         results["pressure_score"]
         + results["balance_score"]
         + results["rotation_score"]
         + results["edging_score"]
-    ) / 4
+    ) / 4)
+    
+    pressure_score = float(results["pressure_score"])
+    balance_score = float(results["balance_score"])
+    rotation_score = float(results["rotation_score"])
+    edging_score = float(results["edging_score"])
+    turns = int(results.get("turns", 0))
+    duration = float(results.get("duration", 0.0))
+    
     write_db = SessionLocal()
     try:
         attempt = VideoAnalysis(
@@ -262,12 +271,12 @@ async def analyze_ski_video_premium_overlay(
             display_mode=display_mode,
             overlay_renderer="premium",
             blue_iq_score=blue_iq_score,
-            pressure_score=results["pressure_score"],
-            balance_score=results["balance_score"],
-            rotation_score=results["rotation_score"],
-            edging_score=results["edging_score"],
-            turns=results.get("turns"),
-            duration=results.get("duration"),
+            pressure_score=pressure_score,
+            balance_score=balance_score,
+            rotation_score=rotation_score,
+            edging_score=edging_score,
+            turns=turns,
+            duration=duration,
             status="completed",
         )
         write_db.add(attempt)
