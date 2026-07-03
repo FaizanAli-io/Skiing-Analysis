@@ -668,16 +668,67 @@ def analyze_video(
             out.release()
         logger.info("Video capture and writer resources released")
         
+        # # Transcode to browser-compatible H.264 using libx264 explicitly,
+        # # since OpenCV's own fourcc-based encoder selection is unreliable
+        # # across platforms (e.g. picks unavailable hardware encoders on EC2).
+        # if 'output_path' in locals() and os.path.exists(output_path):
+        #     import subprocess
+        #     temp_transcode_path = output_path + ".h264.mp4"
+        #     try:
+        #         subprocess.run(
+        #             [
+        #                 "ffmpeg", "-y",
+        #                 "-i", output_path,
+        #                 "-c:v", "libx264",
+        #                 "-preset", "medium",
+        #                 "-crf", "23",
+        #                 "-pix_fmt", "yuv420p",
+        #                 "-movflags", "+faststart",
+        #                 temp_transcode_path,
+        #             ],
+        #             check=True,
+        #             capture_output=True,
+        #             text=True,
+        #         )
+        #         os.replace(temp_transcode_path, output_path)
+        #         logger.info(f"Transcoded output video to H.264: {output_path}")
+        #     except subprocess.CalledProcessError as e:
+        #         logger.error(f"ffmpeg transcode failed, keeping mp4v output: {e.stderr}")
+        #     except FileNotFoundError:
+        #         logger.error("ffmpeg binary not found on PATH, keeping mp4v output")
         # Transcode to browser-compatible H.264 using libx264 explicitly,
         # since OpenCV's own fourcc-based encoder selection is unreliable
         # across platforms (e.g. picks unavailable hardware encoders on EC2).
         if 'output_path' in locals() and os.path.exists(output_path):
             import subprocess
+            import shutil as _shutil
+
+            ffmpeg_bin = _shutil.which("ffmpeg")
+            if not ffmpeg_bin:
+                for candidate in (
+                    r"C:\ffmpeg\bin\ffmpeg.exe",
+                    r"C:\Program Files\ffmpeg\bin\ffmpeg.exe",
+                    "/usr/bin/ffmpeg",
+                    "/usr/local/bin/ffmpeg",
+                ):
+                    if os.path.exists(candidate):
+                        ffmpeg_bin = candidate
+                        break
+
+            if not ffmpeg_bin:
+                logger.error(
+                    "ffmpeg not found on PATH or in known install locations. "
+                    "Output remains mp4v and will NOT play in browsers."
+                )
+                raise RuntimeError(
+                    "ffmpeg is required to produce a browser-playable video but was not found on this machine."
+                )
+
             temp_transcode_path = output_path + ".h264.mp4"
             try:
-                subprocess.run(
+                proc = subprocess.run(
                     [
-                        "ffmpeg", "-y",
+                        ffmpeg_bin, "-y",
                         "-i", output_path,
                         "-c:v", "libx264",
                         "-preset", "medium",
@@ -690,13 +741,13 @@ def analyze_video(
                     capture_output=True,
                     text=True,
                 )
+                if not os.path.exists(temp_transcode_path) or os.path.getsize(temp_transcode_path) == 0:
+                    raise RuntimeError(f"ffmpeg produced no usable output. stderr: {proc.stderr}")
                 os.replace(temp_transcode_path, output_path)
-                logger.info(f"Transcoded output video to H.264: {output_path}")
+                logger.info(f"Transcoded output video to H.264 using: {ffmpeg_bin}")
             except subprocess.CalledProcessError as e:
-                logger.error(f"ffmpeg transcode failed, keeping mp4v output: {e.stderr}")
-            except FileNotFoundError:
-                logger.error("ffmpeg binary not found on PATH, keeping mp4v output")
-
+                logger.error(f"ffmpeg transcode failed (exit {e.returncode}): {e.stderr}")
+                raise RuntimeError(f"ffmpeg transcode failed: {e.stderr}") from e
     # Final calculations
     logger.info("Calculating final scores...")
     try:
