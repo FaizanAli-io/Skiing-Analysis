@@ -336,7 +336,7 @@ function AdminDashboard() {
 
   // Filter attempts by selected client
   const filteredAttempts = selectedClient 
-    ? attempts.filter(attempt => attempt.user_id === parseInt(selectedClient))
+    ? attempts.filter(attempt => attempt.person_id === parseInt(selectedClient))
     : attempts;
   
   const displayedAttempts = filteredAttempts.slice(0, displayCount);
