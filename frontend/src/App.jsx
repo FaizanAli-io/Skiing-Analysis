@@ -49,7 +49,7 @@ async function api(path, { method = "GET", token, body, isForm = false } = {}) {
   if (token) headers.Authorization = `Bearer ${token}`;
   if (body && !isForm) headers["Content-Type"] = "application/json";
 
-  const response = await fetch(`${API_BASE}${path}`, {
+  const response = await fetch(`${API_BASE}/api${path}`, {
     method,
     headers,
     body: isForm ? body : body ? JSON.stringify(body) : undefined,
