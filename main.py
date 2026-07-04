@@ -1,10 +1,11 @@
-from fastapi import FastAPI, UploadFile, File, Form, Depends, APIRouter, HTTPException
+from fastapi import FastAPI, UploadFile, File, Form, Depends, APIRouter, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
 import shutil
 import os
 from datetime import date
+import uuid
 
 # Local imports
 from database import Base, engine, ensure_database_schema, get_db, SessionLocal
@@ -13,8 +14,10 @@ from models.video_analysis import VideoAnalysis
 from schemas.person import PersonIDName
 import crud.person as person_crud
 import crud.video_analysis as video_crud
+import crud.job as job_crud
 from services.new_analysis import analyze_video
-from routes import admin_portal, app_routes, auth, client_portal, person, users, video_analysis
+from services.background_tasks import process_video_analysis_background
+from routes import admin_portal, app_routes, auth, client_portal, person, users, video_analysis, jobs
 import threading
 from services.file_watcher import start_watching
 from typing import Optional, List
@@ -77,14 +80,15 @@ app.add_middleware(
 os.makedirs("outputs", exist_ok=True)
 app.mount("/outputs", StaticFiles(directory="outputs"), name="outputs")
 
-# Include route modules
-app.include_router(video_analysis.router)
-app.include_router(person.router)
-app.include_router(users.router)
-app.include_router(auth.router)
-app.include_router(admin_portal.router)
-app.include_router(client_portal.router)
-app.include_router(app_routes.router)
+# Include route modules with /api prefix
+app.include_router(video_analysis.router, prefix="/api")
+app.include_router(person.router, prefix="/api")
+app.include_router(users.router, prefix="/api")
+app.include_router(auth.router, prefix="/api")
+app.include_router(admin_portal.router, prefix="/api")
+app.include_router(client_portal.router, prefix="/api")
+app.include_router(app_routes.router, prefix="/api")
+app.include_router(jobs.router, prefix="/api")
 
 
 # @app.on_event("startup")
@@ -94,7 +98,7 @@ app.include_router(app_routes.router)
 
 
 # Custom endpoint: Get ID and Name of all persons
-@app.get("/all", response_model=List[PersonIDName])
+@app.get("/api/all", response_model=List[PersonIDName])
 def get_all_persons_id_name(
     _admin: Person = Depends(require_admin),
     db: Session = Depends(get_db),
@@ -102,7 +106,7 @@ def get_all_persons_id_name(
     return person_crud.get_all_persons_id_name(db)
 
 # Video upload and analysis endpoint
-@app.post("/analyze/")
+@app.post("/api/analyze/")
 async def analyze_ski_video(
     person_id: Optional[str] = Form(None),
     display_mode: str = Form("coach"),
@@ -154,7 +158,7 @@ async def analyze_ski_video(
     return results
 
 
-@app.post("/analyze-react-overlay/")
+@app.post("/api/analyze-react-overlay/")
 async def analyze_ski_video_react_overlay(
     display_mode: str = Form("athlete"),
     file: UploadFile = File(...),
@@ -176,14 +180,20 @@ async def analyze_ski_video_react_overlay(
     return results
 
 
-@app.post("/analyze-premium-overlay/")
+@app.post("/api/analyze-premium-overlay/")
 async def analyze_ski_video_premium_overlay(
+    background_tasks: BackgroundTasks,
     user_id: int = Form(...),
     display_mode: str = Form("athlete"),
     report: bool = Form(False),
     file: UploadFile = File(...),
     current_admin: Person = Depends(require_admin),
 ):
+    """
+    Upload a video for background processing.
+    Returns immediately with a job_id to track progress.
+    """
+    # Validate user exists
     read_db = SessionLocal()
     try:
         db_user = person_crud.get_person(read_db, user_id)
@@ -194,101 +204,45 @@ async def analyze_ski_video_premium_overlay(
     finally:
         read_db.close()
 
-    session_date = date.today().isoformat()
+    # Generate unique job ID
+    job_id = str(uuid.uuid4())
+    
+    # Save uploaded file
     os.makedirs("temp_videos", exist_ok=True)
-    file_location = f"temp_videos/{file.filename}"
-
+    file_location = f"temp_videos/{job_id}_{file.filename}"
+    
     with open(file_location, "wb") as f:
         shutil.copyfileobj(file.file, f)
     file.file.close()
-
-    results = analyze_video(
-        file_location,
-        display_mode=display_mode,
-        overlay_renderer="premium",
-        report=report,
-        user_name=user_name,
-        attempt_number=attempt_number,
-        session_date=session_date,
-    )
     
-    # Upload to S3 if enabled
-    s3_video_url = None
-    s3_report_url = None
-    s3_snapshot_url = None
-    s3_uploads = {}
-    
-    if S3Manager.is_enabled():
-        s3_uploads = upload_analysis_files(
-            video_path=results.get("output_path"),
-            report_path=results.get("report_path"),
-            snapshot_path=results.get("snapshot_path")
-        )
-        s3_video_url = s3_uploads.get("video_url")
-        s3_report_url = s3_uploads.get("report_url")
-        s3_snapshot_url = s3_uploads.get("snapshot_url")
-        
-        # Use S3 URLs if available
-        if s3_video_url:
-            results["video_url"] = s3_video_url
-        if s3_report_url:
-            results["report_url"] = s3_report_url
-    
-    # Fallback to local URLs if S3 not enabled
-    if not s3_video_url and "output_path" in results:
-        results["video_url"] = f"/outputs/{os.path.basename(results['output_path'])}"
-    if not s3_report_url and "report_path" in results:
-        results["report_url"] = f"/outputs/{os.path.basename(results['report_path'])}"
-    
-    # Convert numpy floats to Python floats for database compatibility
-    blue_iq_score = float((
-        results["pressure_score"]
-        + results["balance_score"]
-        + results["rotation_score"]
-        + results["edging_score"]
-    ) / 4)
-    
-    pressure_score = float(results["pressure_score"])
-    balance_score = float(results["balance_score"])
-    rotation_score = float(results["rotation_score"])
-    edging_score = float(results["edging_score"])
-    turns = int(results.get("turns", 0))
-    duration = float(results.get("duration", 0.0))
-    
+    # Create job record in database
     write_db = SessionLocal()
     try:
-        attempt = VideoAnalysis(
+        job_crud.create_job(
+            write_db,
+            job_id=job_id,
             person_id=user_id,
-            attempt_number=attempt_number,
-            video_name=file.filename,
-            video_link=results.get("video_url"),  # S3 presigned URL or local URL
-            input_video_path=file_location,
-            output_video_path=results.get("output_path"),  # Local path
-            report_path=s3_report_url if s3_report_url else results.get("report_path"),  # S3 URL or local path
-            s3_video_key=s3_uploads.get("video_s3_key") if S3Manager.is_enabled() else None,
-            s3_report_key=s3_uploads.get("report_s3_key") if S3Manager.is_enabled() else None,
-            s3_snapshot_key=s3_uploads.get("snapshot_s3_key") if S3Manager.is_enabled() else None,
+            file_name=file.filename,
             display_mode=display_mode,
-            overlay_renderer="premium",
-            blue_iq_score=blue_iq_score,
-            pressure_score=pressure_score,
-            balance_score=balance_score,
-            rotation_score=rotation_score,
-            edging_score=edging_score,
-            turns=turns,
-            duration=duration,
-            status="completed",
+            generate_report=report
         )
-        write_db.add(attempt)
-        write_db.commit()
-        write_db.refresh(attempt)
-        results["attempt_id"] = attempt.id
     finally:
         write_db.close()
-
-    results["attempt_number"] = attempt_number
-    results["session_date"] = session_date
-    results["user_id"] = user_id
-    results["user_name"] = user_name
-
-    return results
+    
+    # Add background task
+    background_tasks.add_task(
+        process_video_analysis_background,
+        job_id=job_id,
+        file_path=file_location,
+        user_id=user_id,
+        display_mode=display_mode,
+        report=report,
+        user_name=user_name,
+        attempt_number=attempt_number
+    )
+    
+    return {
+        "job_id": job_id,
+        "status": "pending",
+        "message": "Video upload successful. Processing started in background."
+    }

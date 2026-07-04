@@ -312,22 +312,73 @@ function AdminDashboard() {
     loadData().catch((err) => setError(err.message));
   }, [token]);
 
+  async function pollJobStatus(jobId) {
+    const maxAttempts = 120; // Poll for up to 10 minutes (120 * 5 seconds)
+    let attempts = 0;
+    
+    const poll = async () => {
+      try {
+        const status = await api(`/jobs/${jobId}`, { token });
+        
+        if (status.status === "completed") {
+          setUploadState("Analysis complete!");
+          await loadData();
+          return true;
+        } else if (status.status === "failed") {
+          setError(`Analysis failed: ${status.error_message || "Unknown error"}`);
+          setUploadState("");
+          return true;
+        } else {
+          // Still processing
+          const progressText = status.progress > 0 ? ` (${status.progress}%)` : "";
+          setUploadState(`Processing video${progressText}...`);
+          
+          attempts++;
+          if (attempts < maxAttempts) {
+            setTimeout(poll, 5000); // Poll every 5 seconds
+          } else {
+            setUploadState("Analysis is taking longer than expected. Check back later.");
+          }
+          return false;
+        }
+      } catch (err) {
+        setError(`Failed to check job status: ${err.message}`);
+        setUploadState("");
+        return true;
+      }
+    };
+    
+    await poll();
+  }
+
   async function submitUpload(event) {
     event.preventDefault();
-    const formElement = event.currentTarget; // Save form reference before async operations
+    const formElement = event.currentTarget;
     setError("");
-    setUploadState("Processing video...");
+    setUploadState("Uploading video...");
     const form = new FormData(formElement);
+    
     try {
-      await api("/analyze-premium-overlay/", {
+      // Submit video for background processing
+      const response = await api("/analyze-premium-overlay/", {
         method: "POST",
         token,
         body: form,
         isForm: true,
       });
-      formElement.reset(); // Use saved reference instead of event.currentTarget
-      setUploadState("Analysis complete.");
-      await loadData();
+      
+      // Response contains job_id for tracking
+      if (response.job_id) {
+        formElement.reset();
+        setUploadState("Video uploaded. Processing started...");
+        // Start polling for job completion
+        await pollJobStatus(response.job_id);
+      } else {
+        // Fallback for old response format (shouldn't happen)
+        formElement.reset();
+        setUploadState("Analysis complete.");
+        await loadData();
+      }
     } catch (err) {
       setUploadState("");
       setError(err.message);

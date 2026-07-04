@@ -19,3 +19,4 @@ class Person(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     videos = relationship("VideoAnalysis", back_populates="person")
+    analysis_jobs = relationship("AnalysisJob", back_populates="person")
