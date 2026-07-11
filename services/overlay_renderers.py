@@ -1021,9 +1021,9 @@ def create_premium_overlay(
         # Coach: 2×2 live metric grid
         live_items = [
             ("Ski Separation", f"{_latest_metric_value(metrics,'ski_angle')}\u00b0"),
-            ("Edge Angle",     f"{_latest_metric_value(metrics,'ski_angle2')}\u00b0"),
-            ("Hip Angle",      f"{_latest_metric_value(metrics,'hip_angle')}\u00b0"),
-            ("Bend Angle",     f"{_latest_metric_value(metrics,'bend_angle')}\u00b0"),
+            ("Edging",         f"{_latest_metric_value(metrics,'edge_angle')}\u00b0"),
+            ("Rotation",       f"{_latest_metric_value(metrics,'rotation_angle')}\u00b0"),
+            ("Pressure",       f"{_latest_metric_value(metrics,'pressure_angle')}\u00b0"),
         ]
         LCOL_W  = (panel_w - 8) // 2
         LCARD_H = STAT_H
@@ -1184,9 +1184,9 @@ def create_overlay(frame, metrics, frame_number, TARGET_WIDTH, logo_path=None, d
                     cv2.FONT_HERSHEY_DUPLEX, 0.72, colors["text"], 2)
 
         live_metrics = [
-            ("Ski Separation", f"{_latest_metric_value(metrics, 'ski_angle')} deg"),
-            ("Edge Angle", f"{_latest_metric_value(metrics, 'ski_angle2')} deg"),
-            ("Turns", _latest_metric_value(metrics, "turns", precision=0)),
+            ("Rotation", f"{_latest_metric_value(metrics, 'rotation_angle')} deg"),
+            ("Edging", f"{_latest_metric_value(metrics, 'edge_angle')} deg"),
+            ("Pressure", f"{_latest_metric_value(metrics, 'pressure_angle')} deg"),
         ]
         metric_y = 638
         for label, value in live_metrics:

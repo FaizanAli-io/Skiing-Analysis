@@ -116,6 +116,116 @@ class SkierScoring:
 
         return int(score)
 
+    def getRotationSeparationScore(self, angle, max_angle=8, min_score=0, max_score=180):
+        """Score separation with a steeper penalty below four degrees.
+
+        Internal scores map to Blue IQ by adding 60:
+        0 degrees -> 60, 4 degrees -> 180, 8+ degrees -> 240.
+        """
+        if angle is None or angle <= 0:
+            return min_score
+        if angle >= max_angle:
+            return max_score
+
+        breakpoint_angle = 4
+        breakpoint_score = 120  # Maps to 180 on the 60-240 Blue IQ scale.
+        if angle <= breakpoint_angle:
+            score = (angle / breakpoint_angle) * breakpoint_score
+        else:
+            upper_ratio = (angle - breakpoint_angle) / (max_angle - breakpoint_angle)
+            score = breakpoint_score + upper_ratio * (max_score - breakpoint_score)
+        return int(score)
+
+    def getRotationDynamicsScore(self, angles, target_fps=10):
+        """Score cyclic 2D lower-body lead dynamics on the 60-240 scale."""
+        values = [float(value) for value in angles if value is not None and np.isfinite(value)]
+        if len(values) < 3:
+            return 60
+
+        # Five-sample Hampel filtering removes isolated pose-estimation jumps
+        # without flattening legitimate turn peaks and troughs.
+        smoothed = []
+        for index in range(len(values)):
+            start = max(0, index - 2)
+            end = min(len(values), index + 3)
+            window = np.array(values[start:end], dtype=float)
+            median = float(np.median(window))
+            mad = float(np.median(np.abs(window - median)))
+            threshold = max(3.0, 3.0 * 1.4826 * mad)
+            value = values[index]
+            smoothed.append(median if abs(value - median) > threshold else value)
+
+        extrema = []
+        first_type = "max" if smoothed[0] >= smoothed[1] else "min"
+        extrema.append((0, smoothed[0], first_type))
+        for index in range(1, len(smoothed) - 1):
+            previous_value = smoothed[index - 1]
+            value = smoothed[index]
+            next_value = smoothed[index + 1]
+            if value >= previous_value and value > next_value:
+                extrema.append((index, value, "max"))
+            elif value <= previous_value and value < next_value:
+                extrema.append((index, value, "min"))
+        last_type = "max" if smoothed[-1] >= smoothed[-2] else "min"
+        extrema.append((len(smoothed) - 1, smoothed[-1], last_type))
+
+        # Collapse adjacent extrema of the same type to the more extreme value.
+        alternating = []
+        for extremum in extrema:
+            if alternating and alternating[-1][2] == extremum[2]:
+                replace = (
+                    extremum[1] > alternating[-1][1]
+                    if extremum[2] == "max"
+                    else extremum[1] < alternating[-1][1]
+                )
+                if replace:
+                    alternating[-1] = extremum
+            else:
+                alternating.append(extremum)
+
+        minimum_distance = max(2, int(round(target_fps * 0.2)))
+        valid_segments = []
+        for left, right in zip(alternating, alternating[1:]):
+            frame_distance = right[0] - left[0]
+            amplitude = abs(right[1] - left[1])
+            if frame_distance >= minimum_distance and amplitude >= 2.0:
+                valid_segments.append((left[0], right[0], amplitude))
+
+        if not valid_segments:
+            return 60
+
+        amplitudes = np.array([segment[2] for segment in valid_segments], dtype=float)
+        representative_amplitude = float(np.median(amplitudes))
+        amplitude_quality = float(np.clip((representative_amplitude - 5.0) / 11.0, 0.0, 1.0))
+
+        correct_steps = 0
+        total_steps = 0
+        for start, end, _ in valid_segments:
+            expected_direction = 1 if smoothed[end] > smoothed[start] else -1
+            for index in range(start + 1, end + 1):
+                delta = smoothed[index] - smoothed[index - 1]
+                if abs(delta) <= 0.5 or delta * expected_direction > 0:
+                    correct_steps += 1
+                total_steps += 1
+        smoothness = correct_steps / total_steps if total_steps else 0.0
+
+        amplitude_mean = float(np.mean(amplitudes))
+        amplitude_cv = float(np.std(amplitudes) / amplitude_mean) if amplitude_mean > 0 else 1.0
+        consistency = float(np.exp(-2.0 * amplitude_cv))
+
+        durations = np.array([segment[1] - segment[0] for segment in valid_segments], dtype=float)
+        duration_mean = float(np.mean(durations))
+        duration_cv = float(np.std(durations) / duration_mean) if duration_mean > 0 else 1.0
+        rhythm = float(np.exp(-2.0 * duration_cv))
+
+        dynamics_quality = amplitude_quality * (
+            0.60
+            + 0.20 * smoothness
+            + 0.12 * consistency
+            + 0.08 * rhythm
+        )
+        return float(np.clip(60.0 + 180.0 * dynamics_quality, 60.0, 240.0))
+
     def getPressureAngleScore(self,angle, max_angle=28, min_angle=5, min_score=0, max_score=40):
 
         if angle < 0:
@@ -315,6 +425,15 @@ def calculate_angle(line1, line2):
     return angle_deg
 
 
+def calculate_signed_vertical_angle(start, end, vertical_direction="down"):
+    """Return a signed 2D angle relative to the natural vertical direction."""
+    dx = end[0] - start[0]
+    dy = end[1] - start[1]
+    if vertical_direction == "up":
+        return float(np.degrees(np.arctan2(dx, -dy)))
+    return float(np.degrees(np.arctan2(dx, dy)))
+
+
 
 def resize_and_center_frame(frame, target_width, target_height):
 
@@ -451,6 +570,27 @@ def _line_midpoint(line):
     return ((x1 + x2) // 2, (y1 + y2) // 2)
 
 
+def _draw_joint_angle_arc(frame, vertex, point_a, point_b, color, radius=24):
+    """Draw the shorter angle arc between two segments at a joint."""
+    angle_a = np.degrees(np.arctan2(point_a[1] - vertex[1], point_a[0] - vertex[0]))
+    angle_b = np.degrees(np.arctan2(point_b[1] - vertex[1], point_b[0] - vertex[0]))
+    sweep = (angle_b - angle_a) % 360
+    if sweep > 180:
+        angle_a, angle_b = angle_b, angle_a
+        sweep = 360 - sweep
+    cv2.ellipse(
+        frame,
+        vertex,
+        (radius, radius),
+        0,
+        angle_a,
+        angle_a + sweep,
+        color,
+        2,
+        cv2.LINE_AA,
+    )
+
+
 def draw_biomechanics_overlay(frame, body_points, ski_lines, metrics):
     """Draw coach-mode visual guides for the live biomechanics values.
 
@@ -458,7 +598,9 @@ def draw_biomechanics_overlay(frame, body_points, ski_lines, metrics):
     """
     try:
         guide = (190, 230, 255)
-        accent = (90, 180, 255)
+        accent = (255, 175, 106)
+        pressure_color = (94, 197, 34)
+        rotation_color = (11, 158, 245)
         white = (245, 250, 255)
 
         # Body alignment: shoulder midpoint to hip midpoint.
@@ -472,40 +614,86 @@ def draw_biomechanics_overlay(frame, body_points, ski_lines, metrics):
         right_foot = body_points.get("right_foot")
         navel = body_points.get("navel")
 
-        if left_shoulder and right_shoulder and left_hip and right_hip:
+        # Rotation proxy: midpoint upper/lower-body lead relative to vertical.
+        if all((left_shoulder, right_shoulder, left_hip, right_hip, left_foot, right_foot)):
             shoulder_mid = ((left_shoulder[0] + right_shoulder[0]) // 2, (left_shoulder[1] + right_shoulder[1]) // 2)
             hip_mid = ((left_hip[0] + right_hip[0]) // 2, (left_hip[1] + right_hip[1]) // 2)
-            cv2.line(frame, shoulder_mid, hip_mid, guide, 2, cv2.LINE_AA)
-            cv2.circle(frame, shoulder_mid, 4, white, -1, cv2.LINE_AA)
-            cv2.circle(frame, hip_mid, 4, white, -1, cv2.LINE_AA)
-            hip_angle = metrics.get("hip_angle")
-            if isinstance(hip_angle, (int, float)):
-                _draw_biomech_label(frame, f"Hip {hip_angle:.0f} deg", hip_mid[0] + 12, hip_mid[1] - 12, guide)
+            boot_mid = ((left_foot[0] + right_foot[0]) // 2, (left_foot[1] + right_foot[1]) // 2)
 
-        # Athletic stance / bend guide around the knees.
-        if navel and left_knee and left_foot:
-            cv2.line(frame, navel, left_knee, (120, 220, 180), 2, cv2.LINE_AA)
-            cv2.line(frame, left_knee, left_foot, (120, 220, 180), 2, cv2.LINE_AA)
-            cv2.circle(frame, left_knee, 5, (120, 220, 180), -1, cv2.LINE_AA)
-        if navel and right_knee and right_foot:
-            cv2.line(frame, navel, right_knee, (120, 220, 180), 2, cv2.LINE_AA)
-            cv2.line(frame, right_knee, right_foot, (120, 220, 180), 2, cv2.LINE_AA)
-            cv2.circle(frame, right_knee, 5, (120, 220, 180), -1, cv2.LINE_AA)
-            bend_angle = metrics.get("bend_angle")
-            if isinstance(bend_angle, (int, float)):
-                _draw_biomech_label(frame, f"Stance {bend_angle:.0f} deg", right_knee[0] + 12, right_knee[1] + 8, (120, 220, 180))
+            cv2.line(
+                frame,
+                (hip_mid[0], shoulder_mid[1] - 12),
+                (hip_mid[0], boot_mid[1] + 12),
+                guide,
+                1,
+                cv2.LINE_AA,
+            )
+            cv2.line(frame, hip_mid, shoulder_mid, rotation_color, 3, cv2.LINE_AA)
+            cv2.line(frame, hip_mid, boot_mid, rotation_color, 3, cv2.LINE_AA)
+            cv2.circle(frame, shoulder_mid, 5, rotation_color, -1, cv2.LINE_AA)
+            cv2.circle(frame, hip_mid, 5, rotation_color, -1, cv2.LINE_AA)
+            cv2.circle(frame, boot_mid, 5, rotation_color, -1, cv2.LINE_AA)
 
-        # Ski lines, separation, and edge-to-vertical reference.
+            rotation_angle = metrics.get("rotation_angle")
+            if isinstance(rotation_angle, (int, float)):
+                _draw_biomech_label(
+                    frame,
+                    f"Rotation {rotation_angle:.0f} deg",
+                    hip_mid[0] + 16,
+                    hip_mid[1] - 14,
+                    rotation_color,
+                )
+
+        # Pressure: thigh and shin vectors with knee flexion angle.
+        if left_hip and left_knee and left_foot:
+            cv2.line(frame, left_hip, left_knee, pressure_color, 3, cv2.LINE_AA)
+            cv2.line(frame, left_knee, left_foot, pressure_color, 3, cv2.LINE_AA)
+            cv2.circle(frame, left_knee, 5, pressure_color, -1, cv2.LINE_AA)
+            _draw_joint_angle_arc(frame, left_knee, left_hip, left_foot, pressure_color)
+        if right_hip and right_knee and right_foot:
+            cv2.line(frame, right_hip, right_knee, pressure_color, 3, cv2.LINE_AA)
+            cv2.line(frame, right_knee, right_foot, pressure_color, 3, cv2.LINE_AA)
+            cv2.circle(frame, right_knee, 5, pressure_color, -1, cv2.LINE_AA)
+            _draw_joint_angle_arc(frame, right_knee, right_hip, right_foot, pressure_color)
+
+            pressure_angle = metrics.get("pressure_angle")
+            if isinstance(pressure_angle, (int, float)):
+                _draw_biomech_label(
+                    frame,
+                    f"Pressure {pressure_angle:.0f} deg",
+                    right_knee[0] + 14,
+                    right_knee[1] + 10,
+                    pressure_color,
+                )
+
+        # Recent vertical hip travel, displayed as a compact range bar.
+        pressure_range = metrics.get("pressure_vertical_range")
+        if right_hip and pressure_range and len(pressure_range) == 3:
+            range_min, range_max, current = pressure_range
+            bar_x = min(frame.shape[1] - 12, right_hip[0] + 42)
+            bar_top = max(12, right_hip[1] - 32)
+            bar_bottom = min(frame.shape[0] - 12, right_hip[1] + 32)
+            cv2.line(frame, (bar_x, bar_top), (bar_x, bar_bottom), guide, 2, cv2.LINE_AA)
+            cv2.line(frame, (bar_x - 5, bar_top), (bar_x + 5, bar_top), guide, 2, cv2.LINE_AA)
+            cv2.line(frame, (bar_x - 5, bar_bottom), (bar_x + 5, bar_bottom), guide, 2, cv2.LINE_AA)
+            if range_max > range_min:
+                ratio = (current - range_min) / (range_max - range_min)
+            else:
+                ratio = 0.5
+            marker_y = int(bar_top + ratio * (bar_bottom - bar_top))
+            cv2.circle(frame, (bar_x, marker_y), 5, pressure_color, -1, cv2.LINE_AA)
+
+        # Edging: ski base against the horizontal carpet reference.
         if ski_lines:
             first_line = ski_lines[0]
             x1, y1, x2, y2 = first_line
             cv2.line(frame, (x1, y1), (x2, y2), accent, 3, cv2.LINE_AA)
             mid_x, mid_y = _line_midpoint(first_line)
             ref_len = 70
-            cv2.line(frame, (mid_x, mid_y - ref_len // 2), (mid_x, mid_y + ref_len // 2), white, 1, cv2.LINE_AA)
+            cv2.line(frame, (mid_x - ref_len // 2, mid_y), (mid_x + ref_len // 2, mid_y), white, 1, cv2.LINE_AA)
             edge_angle = metrics.get("edge_angle")
             if isinstance(edge_angle, (int, float)):
-                _draw_biomech_label(frame, f"Edge {edge_angle:.0f} deg", mid_x + 12, mid_y - 18, accent)
+                _draw_biomech_label(frame, f"Edging {edge_angle:.0f} deg", mid_x + 12, mid_y - 18, accent)
 
         if len(ski_lines) >= 2:
             mid_a = _line_midpoint(ski_lines[0])
@@ -513,11 +701,8 @@ def draw_biomechanics_overlay(frame, body_points, ski_lines, metrics):
             cv2.line(frame, mid_a, mid_b, white, 2, cv2.LINE_AA)
             cv2.circle(frame, mid_a, 4, white, -1, cv2.LINE_AA)
             cv2.circle(frame, mid_b, 4, white, -1, cv2.LINE_AA)
-            sep = metrics.get("ski_separation")
-            if isinstance(sep, (int, float)):
-                label_x = (mid_a[0] + mid_b[0]) // 2 + 10
-                label_y = (mid_a[1] + mid_b[1]) // 2 - 10
-                _draw_biomech_label(frame, f"Skis {sep:.0f} deg", label_x, label_y, white)
+            # This connector shows ski separation, not edge angle, so it stays
+            # unlabeled until the parallel-control presentation is defined.
 
     except Exception:
         return frame
@@ -651,6 +836,7 @@ def calculate_blue_scores(
     skiAngle2_score,
     pressure_angle_score,
     pressure_speed_score,
+    rotation_separation_score,
     hip_shoulder,
     scoring,
     target_fps,
@@ -692,6 +878,7 @@ def calculate_blue_scores(
     skiAngle2_score = remove_outliers(skiAngle2_score)
     pressure_angle_score = remove_outliers(pressure_angle_score)
     pressure_speed_score = remove_outliers(pressure_speed_score)
+    rotation_separation_score = remove_outliers(rotation_separation_score)
 
     knee_angle_score = getMax50Percent(knee_angle_score)
     bending_angle_score = getMax50Percent(bending_angle_score)
@@ -705,6 +892,10 @@ def calculate_blue_scores(
     avg_skiAngle2_score = sum(skiAngle2_score) / len(skiAngle2_score) if skiAngle2_score else 0
     avg_pressure_angle_score = sum(pressure_angle_score) / len(pressure_angle_score) if pressure_angle_score else 0
     avg_pressure_speed_score = sum(pressure_speed_score) / len(pressure_speed_score) if pressure_speed_score else 0
+    avg_rotation_separation_score = (
+        sum(rotation_separation_score) / len(rotation_separation_score)
+        if rotation_separation_score else None
+    )
     avg_shoulder_hip_score = sum(hip_shoulder) / len(hip_shoulder) if hip_shoulder else 0
 
     # print(f"Avg hip-shoulder angle score : {avg_shoulder_hip_score}")
@@ -727,8 +918,17 @@ def calculate_blue_scores(
     Blue_balance_final = Blue_balance_score
 
     # Rotation scoring
-    Blue_rotation_score = (avg_skiAngle2_score + avg_lateral_score) / 2
-    Blue_rotation_final = Blue_rotation_score * 0.7 + score_noOfTurns * 0.3
+    legacy_rotation_score = (
+        ((avg_skiAngle2_score + avg_lateral_score) / 2) * 0.7
+        + score_noOfTurns * 0.3
+    )
+    if avg_rotation_separation_score is None:
+        Blue_rotation_final = legacy_rotation_score
+    else:
+        Blue_rotation_final = (
+            0.2 * avg_rotation_separation_score
+            + 0.8 * legacy_rotation_score
+        )
 
     # Pressure scoring
     total_frames = scoring.getFramesInTurn(turns, target_fps)

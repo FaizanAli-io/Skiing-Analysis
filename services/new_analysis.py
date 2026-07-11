@@ -32,9 +32,14 @@ metrices = {
     "tilt" :[],
     "speed/lateral movement" : [],
     "knee_angle" : [],
+    "pressure_angle" : [],
+    "rotation_angle" : [],
+    "rotation_upper_angle" : [],
+    "rotation_lower_angle" : [],
     "bend_angle" : [],
     "ski_angle" : [],
     "ski_angle2" : [],
+    "edge_angle" : [],
     "turns" : [],
     "Blue_pressure_final": 0,
     "Blue_rotation_final": 0,
@@ -191,10 +196,19 @@ def analyze_video(
         skiAngle = None
         skiAngle2 = None
         TskiAngles2 = []
+        edgeAngles = []
+        edgeAngle = None
         bendAngles = []
         bendAngle = None
         kneeAngles = []
         kneeAngle = None
+        pressureKneeAngles = []
+        pressureKneeAngle = None
+        pressureVerticalPositions = []
+        rotationSeparationAngles = []
+        rotationSeparationAngle = None
+        rotationUpperAngle = None
+        rotationLowerAngle = None
         hipAngles = []
         prev_point = None
         speed_list = []
@@ -221,6 +235,7 @@ def analyze_video(
         skiAngle2_score = []
         pressure_speed_score = []
         pressure_angle_score = []
+        rotation_separation_score = []
         score_timeline = []
         snapshot_path = os.path.splitext(output_path)[0] + "_snapshot.jpg"
         snapshot_saved = False
@@ -451,6 +466,23 @@ def analyze_video(
 
                             kneeAngles.append(kneeAngle)
 
+                            # Coach overlay Pressure measurement: true thigh-to-
+                            # shin flexion at each knee. Keep it independent from
+                            # the legacy navel-based knee score above.
+                            leftPressureAngle = calculate_angle(
+                                (left_knee_x, left_knee_y, left_hip_x, left_hip_y),
+                                (left_knee_x, left_knee_y, left_foot_x, left_foot_y),
+                            )
+                            rightPressureAngle = calculate_angle(
+                                (right_knee_x, right_knee_y, right_hip_x, right_hip_y),
+                                (right_knee_x, right_knee_y, right_foot_x, right_foot_y),
+                            )
+                            pressureKneeAngle = (leftPressureAngle + rightPressureAngle) / 2
+                            pressureKneeAngles.append(pressureKneeAngle)
+
+                            hip_mid_y = (left_hip_y + right_hip_y) / 2
+                            pressureVerticalPositions.append(hip_mid_y)
+
                             bendAngle1 = calculate_angle((navel_x, navel_y, left_foot_x, left_foot_y), (0, 0, 1, 0))
                             bendAngle2 = calculate_angle((navel_x, navel_y, right_foot_x, right_foot_y), (0, 0, 1, 0))
                             bendAngle = bendAngle1
@@ -468,6 +500,7 @@ def analyze_video(
                 # Process ski detection
                 flag = False
                 ski_lines = []
+                edgeAngle = None
                 if ski_boxes:
                     logger.debug(f"Processing {len(ski_boxes)} ski boxes")
                     try:
@@ -479,12 +512,28 @@ def analyze_video(
                             skiAngles.append(skiAngle)
                             logger.debug(f"Angle between skis: {skiAngle:.2f}Â°")
 
+                            # Average both ski bases against the horizontal
+                            # carpet reference for the displayed edge angle.
+                            detected_edge_angles = [
+                                calculate_angle(line, (0, 0, 1, 0))
+                                for line in ski_lines
+                            ]
+                            edgeAngle = sum(detected_edge_angles) / len(detected_edge_angles)
+                            edgeAngles.append(edgeAngle)
+
+                            # Keep this legacy vertical-based value unchanged;
+                            # existing rotation scoring and turn detection use it.
                             skiAngle2 = calculate_angle(ski_lines[0], (0, 0, 0, 1))
                             TskiAngles2.append((skiAngle2, time))
 
                         elif len(ski_lines) == 1:
                             skiAngle2 = calculate_angle(ski_lines[0], (0, 0, 0, 1))
                             TskiAngles2.append((skiAngle2, time))
+
+                            # One ski is insufficient for a reliable edge angle.
+                            if edgeAngles:
+                                avg_count = min(len(edgeAngles), 10)
+                                edgeAngle = sum(edgeAngles[-avg_count:]) / avg_count
 
                             if skiAngles:
                                 avg_count = min(len(skiAngles), 10)
@@ -494,6 +543,9 @@ def analyze_video(
                                     logger.debug(f"Estimated ski angle: {skiAngle:.2f}Â°")
 
                         else:
+                            if edgeAngles:
+                                avg_count = min(len(edgeAngles), 10)
+                                edgeAngle = sum(edgeAngles[-avg_count:]) / avg_count
                             if skiAngles:
                                 avg_count = min(len(skiAngles), 10)
                                 if avg_count != 0:
@@ -505,11 +557,61 @@ def analyze_video(
 
                 # Handle case where ski detection fails
                 if not flag:
+                    if edgeAngles:
+                        avg_count = min(len(edgeAngles), 10)
+                        edgeAngle = sum(edgeAngles[-avg_count:]) / avg_count
                     if skiAngles:
                         avg_count = min(len(skiAngles), 10)
                         if avg_count != 0:
                             skiAngle = sum(skiAngles[-avg_count:]) / avg_count
                             skiAngles.append(skiAngle)
+
+                # Rotation proxy for a single front-facing camera. Compare the
+                # signed lean of hip-to-shoulder and hip-to-boot midpoint lines.
+                rotationSeparationAngle = None
+                rotationUpperAngle = None
+                rotationLowerAngle = None
+                if biomech_body_points:
+                    left_shoulder = biomech_body_points.get("left_shoulder")
+                    right_shoulder = biomech_body_points.get("right_shoulder")
+                    left_hip = biomech_body_points.get("left_hip")
+                    right_hip = biomech_body_points.get("right_hip")
+                    left_foot = biomech_body_points.get("left_foot")
+                    right_foot = biomech_body_points.get("right_foot")
+                    if all((left_shoulder, right_shoulder, left_hip, right_hip, left_foot, right_foot)):
+                        shoulder_mid = (
+                            (left_shoulder[0] + right_shoulder[0]) // 2,
+                            (left_shoulder[1] + right_shoulder[1]) // 2,
+                        )
+                        hip_mid = (
+                            (left_hip[0] + right_hip[0]) // 2,
+                            (left_hip[1] + right_hip[1]) // 2,
+                        )
+                        boot_mid = (
+                            (left_foot[0] + right_foot[0]) // 2,
+                            (left_foot[1] + right_foot[1]) // 2,
+                        )
+                        rotationUpperAngle = calculate_signed_vertical_angle(
+                            hip_mid, shoulder_mid, "up"
+                        )
+                        rotationLowerAngle = calculate_signed_vertical_angle(
+                            hip_mid, boot_mid, "down"
+                        )
+                        raw_rotation_angle = abs(
+                            (rotationLowerAngle - rotationUpperAngle + 180) % 360 - 180
+                        )
+                        rotationSeparationAngles.append(raw_rotation_angle)
+                        avg_count = min(len(rotationSeparationAngles), 10)
+                        rotationSeparationAngle = sum(rotationSeparationAngles[-avg_count:]) / avg_count
+                        rotation_dynamics_score = scoring.getRotationDynamicsScore(
+                            rotationSeparationAngles, target_fps
+                        )
+                        # Keep only the current whole-signal score. Averaging all
+                        # earlier partial timelines would unfairly dilute it.
+                        rotation_separation_score[:] = [rotation_dynamics_score]
+                if rotationSeparationAngle is None and rotationSeparationAngles:
+                    avg_count = min(len(rotationSeparationAngles), 10)
+                    rotationSeparationAngle = sum(rotationSeparationAngles[-avg_count:]) / avg_count
 
                 if display_mode == "coach" and biomech_body_points:
                     frame = draw_biomechanics_overlay(
@@ -518,7 +620,16 @@ def analyze_video(
                         ski_lines,
                         {
                             "ski_separation": skiAngle,
-                            "edge_angle": skiAngle2,
+                            "edge_angle": edgeAngle,
+                            "pressure_angle": pressureKneeAngle,
+                            "pressure_vertical_range": (
+                                min(pressureVerticalPositions[-30:]),
+                                max(pressureVerticalPositions[-30:]),
+                                pressureVerticalPositions[-1],
+                            ) if pressureVerticalPositions else None,
+                            "rotation_angle": rotationSeparationAngle,
+                            "rotation_upper_angle": rotationUpperAngle,
+                            "rotation_lower_angle": rotationLowerAngle,
                             "hip_angle": hipAngle,
                             "bend_angle": bendAngle,
                         },
@@ -554,9 +665,14 @@ def analyze_video(
                 # Update metrics
                 metrices["ski_angle"].append(skiAngle)
                 metrices["ski_angle2"].append(skiAngle2)
+                metrices["edge_angle"].append(edgeAngle)
                 metrices["turns"].append(turns)
                 metrices["bend_angle"].append(bendAngle)
                 metrices["knee_angle"].append(kneeAngle)
+                metrices["pressure_angle"].append(pressureKneeAngle)
+                metrices["rotation_angle"].append(rotationSeparationAngle)
+                metrices["rotation_upper_angle"].append(rotationUpperAngle)
+                metrices["rotation_lower_angle"].append(rotationLowerAngle)
                 metrices["hip_angle"].append(hipAngle)
                 metrices["hip_vert_angle"].append(hipVertAngle)
                 metrices["speed/lateral movement"].append(speed)
@@ -566,7 +682,7 @@ def analyze_video(
                 Blue_edging_final, Blue_balance_final, Blue_rotation_final, Blue_pressure_final = calculate_blue_scores(
                     turns, duration, TskiAngles2, edging_angle_score, lateral_score, bending_angle_score,
                     knee_angle_score, skiAngle2_score, pressure_angle_score, pressure_speed_score,
-                    hip_shoulder, scoring, target_fps, count_tilt
+                    rotation_separation_score, hip_shoulder, scoring, target_fps, count_tilt
                 )
 
                 metrices["Blue_balance_final"] = Blue_balance_final
@@ -581,6 +697,7 @@ def analyze_video(
                     "edging": Blue_edging_final,
                     "ski_parallel_control": skiAngle,
                     "edge_control": skiAngle2,
+                    "rotation_separation": rotationSeparationAngle,
                     "upper_body_alignment": hipAngle,
                     "athletic_stance_knee": kneeAngle,
                     "athletic_stance_bend": bendAngle,
@@ -754,7 +871,7 @@ def analyze_video(
         Blue_edging_final, Blue_balance_final, Blue_rotation_final, Blue_pressure_final = calculate_blue_scores(
             turns, duration, TskiAngles2, edging_angle_score, lateral_score, bending_angle_score,
             knee_angle_score, skiAngle2_score, pressure_angle_score, pressure_speed_score,
-            hip_shoulder, scoring, target_fps, count_tilt
+            rotation_separation_score, hip_shoulder, scoring, target_fps, count_tilt
         )
 
         logger.info(f"Final Scores:")
