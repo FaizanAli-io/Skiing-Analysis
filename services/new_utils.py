@@ -242,6 +242,86 @@ class SkierScoring:
 
         return int(score)
 
+    def getPressureVerticalRange(self, relative_heights):
+        """Return robust P90-P10 pelvis travel as a fraction of body height."""
+        values = [
+            float(value) for value in relative_heights
+            if value is not None and np.isfinite(value)
+        ]
+        if len(values) < 3:
+            return 0.0
+
+        filtered = []
+        for index, value in enumerate(values):
+            start = max(0, index - 2)
+            end = min(len(values), index + 3)
+            window = np.array(values[start:end], dtype=float)
+            median = float(np.median(window))
+            mad = float(np.median(np.abs(window - median)))
+            threshold = max(0.015, 3.0 * 1.4826 * mad)
+            filtered.append(median if abs(value - median) > threshold else value)
+
+        return max(
+            0.0,
+            float(np.percentile(filtered, 90) - np.percentile(filtered, 10)),
+        )
+
+    def getPressureVerticalRangeScore(
+        self,
+        relative_heights,
+        minimum_useful_range=0.05,
+        target_range=0.12,
+    ):
+        """Map normalized vertical travel linearly onto the 60-240 scale."""
+        vertical_range = self.getPressureVerticalRange(relative_heights)
+        quality = np.clip(
+            (vertical_range - minimum_useful_range)
+            / (target_range - minimum_useful_range),
+            0.0,
+            1.0,
+        )
+        return float(60.0 + 180.0 * quality)
+
+    def getPressureKneeAngleRange(self, knee_angles):
+        """Return robust P90-P10 flexion/extension range in degrees."""
+        values = [
+            float(value) for value in knee_angles
+            if value is not None and np.isfinite(value)
+        ]
+        if len(values) < 3:
+            return 0.0
+
+        filtered = []
+        for index, value in enumerate(values):
+            start = max(0, index - 2)
+            end = min(len(values), index + 3)
+            window = np.array(values[start:end], dtype=float)
+            median = float(np.median(window))
+            mad = float(np.median(np.abs(window - median)))
+            threshold = max(5.0, 3.0 * 1.4826 * mad)
+            filtered.append(median if abs(value - median) > threshold else value)
+
+        return max(
+            0.0,
+            float(np.percentile(filtered, 90) - np.percentile(filtered, 10)),
+        )
+
+    def getPressureKneeRangeScore(
+        self,
+        knee_angles,
+        minimum_useful_range=18.0,
+        target_range=45.0,
+    ):
+        """Map knee flexion/extension range linearly onto the 60-240 scale."""
+        knee_range = self.getPressureKneeAngleRange(knee_angles)
+        quality = np.clip(
+            (knee_range - minimum_useful_range)
+            / (target_range - minimum_useful_range),
+            0.0,
+            1.0,
+        )
+        return float(60.0 + 180.0 * quality)
+
     def getTiltScore(self,tilt_ratio, min_score=0, max_score=40):
 
         if not 0 <= tilt_ratio <= 1:
@@ -278,11 +358,6 @@ class SkierScoring:
 
         avg_change = total_change/(len(last_angles) - 1 - miss)
 
-        print("SKI ANGLE 2: ")
-        print(last_angles)
-        print(total_change)
-        print(avg_change)
-
         score = avg_change * 30
 
         score = min(score, 180)
@@ -292,11 +367,9 @@ class SkierScoring:
         return score
 
     def getBodyAngleScore(self, angle):
-        print(f"Body Angle: {angle}")
         x = 180 / (45 - 85)
         score = 180 + x*(angle - 45)
         # score = 4 * (90 - angle)
-        print(f"Body Angle Score: {score}")
         score = max(0, score)
         score = min(score, 180)
         return score
@@ -304,9 +377,7 @@ class SkierScoring:
     def getKneeAngleScore(self, angle, skiAngle):
         if skiAngle > 20:
             return 0
-        print(f"Knee angle: {angle}")
         score = 2.5 * (angle)
-        print(f"Knee angle score: {score}")
         score = max(0, score)
         score = min(score, 180)
         return score
@@ -356,17 +427,13 @@ class SkierScoring:
             time /=10
             if status == "Moving" and angle < startingAngle:
                 status = "Turning"
-                print(f"Started Turning at {angle} degrees - {time} seconds")
                 start = time
             elif status == "Turning" and angle > stoppingAngle and time - start > 0.2:
                 status = "Moving"
-                print(f"Stopped Turning at {angle} degrees - {time} seconds")
                 timeTaken = round(time - start, 1)
                 start = None
                 times.append(timeTaken)
                 turn += 1
-                print(f"Time Taken for turn {turn}: {timeTaken}")
-        print(f"Turning times: {times}")
         return times
 
     def getNoOfTurnsScore(self, timePerTurn):
@@ -380,11 +447,9 @@ class SkierScoring:
     def getTurnTimeScore(self, avgTurningTime):
         x = 180 / (0.25 - 0.6)
         score = 180 + x*(avgTurningTime - 0.25)
-        print(avgTurningTime)
         # score = avgTurningTime * 250
         # print(score)
         # score = 210 - score
-        print(score)
         score = max(0, score)
         score = min(score, 180)
         return score
@@ -680,7 +745,9 @@ def draw_biomechanics_overlay(frame, body_points, ski_lines, metrics):
                 ratio = (current - range_min) / (range_max - range_min)
             else:
                 ratio = 0.5
-            marker_y = int(bar_top + ratio * (bar_bottom - bar_top))
+            # Larger relative height means the pelvis is higher, so invert the
+            # screen-space Y direction when positioning the marker.
+            marker_y = int(bar_top + (1.0 - ratio) * (bar_bottom - bar_top))
             cv2.circle(frame, (bar_x, marker_y), 5, pressure_color, -1, cv2.LINE_AA)
 
         # Edging: ski base against the horizontal carpet reference.
@@ -836,11 +903,14 @@ def calculate_blue_scores(
     skiAngle2_score,
     pressure_angle_score,
     pressure_speed_score,
+    pressure_relative_heights,
+    pressure_knee_angles,
     rotation_separation_score,
     hip_shoulder,
     scoring,
     target_fps,
-    count_tilt
+    count_tilt,
+    score_details=None,
 ):
     # Turn-based scores
     if turns == 0:
@@ -853,7 +923,6 @@ def calculate_blue_scores(
 
         turningTimes = scoring.getTurnDurations(TskiAngles2)
         turningTimes = remove_outliers(turningTimes)
-        print(turningTimes)
 
         if turningTimes:
             avgTurningTime = round(sum(turningTimes) / len(turningTimes), 2)
@@ -902,9 +971,8 @@ def calculate_blue_scores(
 
     # Edging scoring
     Blue_edging_score = (
-        0.55 * avg_edging_angle_score +
-        0.35 * avg_lateral_score +
-        0.1 * avg_shoulder_hip_score
+        0.70 * avg_edging_angle_score +
+        0.30 * avg_lateral_score
     )
     Blue_edging_final = Blue_edging_score
 
@@ -917,32 +985,69 @@ def calculate_blue_scores(
     )
     Blue_balance_final = Blue_balance_score
 
-    # Rotation scoring
-    legacy_rotation_score = (
-        ((avg_skiAngle2_score + avg_lateral_score) / 2) * 0.7
-        + score_noOfTurns * 0.3
+    # Rotation scoring: body-separation dynamics is the primary signal.
+    rotation_separation_component = (
+        avg_rotation_separation_score
+        if avg_rotation_separation_score is not None
+        else 60.0
     )
-    if avg_rotation_separation_score is None:
-        Blue_rotation_final = legacy_rotation_score
-    else:
-        Blue_rotation_final = (
-            0.2 * avg_rotation_separation_score
-            + 0.8 * legacy_rotation_score
-        )
+    Blue_rotation_final = float(np.clip(
+        0.70 * rotation_separation_component
+        + 0.20 * avg_lateral_score
+        + 0.10 * avg_skiAngle2_score,
+        60.0,
+        240.0,
+    ))
 
-    # Pressure scoring
-    total_frames = scoring.getFramesInTurn(turns, target_fps)
-    ratio = scoring.calculateTiltRatio(total_frames, count_tilt)
-    tilt_score = scoring.getTiltScore(ratio)
+    # Legacy Pressure scoring retained for comparison and rollback.
+    # total_frames = scoring.getFramesInTurn(turns, target_fps)
+    # ratio = scoring.calculateTiltRatio(total_frames, count_tilt)
+    # tilt_score = scoring.getTiltScore(ratio)
+    # Blue_pressure_score = (
+    #     avg_pressure_angle_score + avg_pressure_speed_score + tilt_score
+    # )
+    # Blue_pressure_final = scoring.mapScore(Blue_pressure_score)
 
-    Blue_pressure_score = avg_pressure_angle_score + avg_pressure_speed_score + tilt_score
-    Blue_pressure_final = scoring.mapScore(Blue_pressure_score)
+    # New Pressure proxies. A static crouch has near-zero movement range and
+    # therefore cannot receive a high score from knee flexion alone.
+    pressure_vertical_score = scoring.getPressureVerticalRangeScore(
+        pressure_relative_heights
+    )
+    pressure_knee_range_score = scoring.getPressureKneeRangeScore(
+        pressure_knee_angles
+    )
+    vertical_quality = (pressure_vertical_score - 60.0) / 180.0
+    knee_range_quality = (pressure_knee_range_score - 60.0) / 180.0
+
+    pressure_quality = (
+        0.75 * vertical_quality
+        + 0.25 * knee_range_quality
+    )
+    Blue_pressure_final = float(np.clip(
+        60.0 + 180.0 * pressure_quality,
+        60.0,
+        240.0,
+    ))
+
+    if score_details is not None:
+        score_details.clear()
+        score_details.update({
+            "pressure_vertical_range": scoring.getPressureVerticalRange(
+                pressure_relative_heights
+            ),
+            "pressure_vertical_score": pressure_vertical_score,
+            "pressure_knee_range": scoring.getPressureKneeAngleRange(
+                pressure_knee_angles
+            ),
+            "pressure_knee_range_score": pressure_knee_range_score,
+            "rotation_separation_score": avg_rotation_separation_score,
+            "rotation_direction_change_score": avg_skiAngle2_score,
+            "rotation_lateral_score": avg_lateral_score,
+            "edging_parallelism_score": avg_edging_angle_score,
+            "edging_lateral_score": avg_lateral_score,
+        })
 
 
-
-    print(f"Avg bending angle score: {avg_bending_angle_score}")
-    print(f"Avg knee angle score: {avg_knee_angle_score}")
-    print(f"Avg lateral score: {avg_lateral_score}")
 
     return Blue_edging_final,Blue_balance_final,Blue_rotation_final,Blue_pressure_final
 

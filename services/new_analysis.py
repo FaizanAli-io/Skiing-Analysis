@@ -9,17 +9,41 @@ import time
 from datetime import date
 from typing import Dict, Any, Optional, Tuple, List
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('ski_analysis.log'),
-        logging.StreamHandler()
-    ]
-)
-
+# Suppress verbose analysis messages. A dedicated logger below emits only the
+# requested per-frame Pressure and Rotation details.
 logger = logging.getLogger(__name__)
+logger.handlers.clear()
+logger.addHandler(logging.NullHandler())
+logger.propagate = False
+logger.setLevel(logging.CRITICAL + 1)
+
+ANALYSIS_LOG_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "ski_analysis.log",
+)
+frame_metrics_logger = logging.getLogger("blueiq.frame_metrics")
+frame_metrics_logger.handlers.clear()
+frame_metrics_logger.propagate = False
+frame_metrics_logger.setLevel(logging.INFO)
+frame_console_handler = logging.StreamHandler()
+frame_console_handler.setFormatter(logging.Formatter("%(message)s"))
+frame_metrics_logger.addHandler(frame_console_handler)
+
+
+def _reset_frame_metrics_log():
+    """Reuse and truncate ski_analysis.log for each video analysis."""
+    for handler in list(frame_metrics_logger.handlers):
+        if isinstance(handler, logging.FileHandler):
+            frame_metrics_logger.removeHandler(handler)
+            handler.close()
+
+    file_handler = logging.FileHandler(
+        ANALYSIS_LOG_PATH,
+        mode="w",
+        encoding="utf-8",
+    )
+    file_handler.setFormatter(logging.Formatter("%(message)s"))
+    frame_metrics_logger.addHandler(file_handler)
 
 # Suppress ultralytics verbose logging
 logging.getLogger('ultralytics').setLevel(logging.WARNING)
@@ -33,6 +57,9 @@ metrices = {
     "speed/lateral movement" : [],
     "knee_angle" : [],
     "pressure_angle" : [],
+    "pressure_knee_range" : [],
+    "pressure_relative_height" : [],
+    "pressure_vertical_range" : [],
     "rotation_angle" : [],
     "rotation_upper_angle" : [],
     "rotation_lower_angle" : [],
@@ -68,6 +95,7 @@ def analyze_video(
     session_date: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Analyze ski video and return performance metrics"""
+    _reset_frame_metrics_log()
     logger.info(f"Starting video analysis for: {video_path}")
     display_mode = display_mode.lower().strip()
     if display_mode not in {"coach", "athlete"}:
@@ -205,6 +233,8 @@ def analyze_video(
         pressureKneeAngles = []
         pressureKneeAngle = None
         pressureVerticalPositions = []
+        pressureRelativeHeights = []
+        pressureRelativeHeight = None
         rotationSeparationAngles = []
         rotationSeparationAngle = None
         rotationUpperAngle = None
@@ -237,6 +267,12 @@ def analyze_video(
         pressure_angle_score = []
         rotation_separation_score = []
         score_timeline = []
+        pillar_score_history = {
+            "pressure": [],
+            "balance": [],
+            "rotation": [],
+            "edging": [],
+        }
         snapshot_path = os.path.splitext(output_path)[0] + "_snapshot.jpg"
         snapshot_saved = False
         snapshot_frame_target = max(1, int((total_frames / frame_skip) * 0.5))
@@ -334,14 +370,20 @@ def analyze_video(
                 frame_count += 1
                 continue
 
-            processed_frames += 1
-            if processed_frames % 50 == 0:
-                logger.info(f"Processed {processed_frames} frames...")
-
-            time += 1
-            index_counter += 1
-            
             try:
+                # Reset frame-local measurements so a missed detection cannot
+                # append stale values from the previous frame.
+                hipAngle = None
+                hipVertAngle = None
+                speed = None
+                kneeAngle = None
+                bendAngle = None
+                pressureKneeAngle = None
+                pressureRelativeHeight = None
+                skiAngle = None
+                skiAngle2 = None
+                edgeAngleMeasured = False
+
                 results = model.track(frame, persist=True)
                 
                 # Convert frame to RGB for MediaPipe
@@ -353,6 +395,42 @@ def analyze_video(
                 biomech_body_points = None
 
                 detected_people, ski_boxes, detected_ids = detect_people_and_skis_from_results(results, scores, history)
+
+                pose_detected = pose_results.pose_landmarks is not None
+                yolo_person_detected = bool(detected_people)
+
+                # Skip only when both independent person signals fail.
+                if not pose_detected and not yolo_person_detected:
+                    frame_count += 1
+                    continue
+
+                # MediaPipe can retain a valid athlete pose when YOLO briefly
+                # misses the person. Feed that pose through the existing single-
+                # athlete path without inventing movement history for YOLO.
+                if pose_detected and not yolo_person_detected:
+                    fallback_track_id = track_memory["Person1"]
+                    if fallback_track_id is None:
+                        fallback_track_id = -1
+                    track_memory["Person1"] = fallback_track_id
+                    frame_h, frame_w = frame.shape[:2]
+                    detected_people = [(
+                        fallback_track_id,
+                        0,
+                        0,
+                        frame_w,
+                        frame_h,
+                        frame_w,
+                        frame_h,
+                        frame_w // 2,
+                        frame_h // 2,
+                    )]
+
+                processed_frames += 1
+                time += 1
+                index_counter += 1
+
+                if processed_frames % 50 == 0:
+                    logger.info(f"Processed {processed_frames} frames...")
 
                 if detected_people:
                     # Sort to pick the most relevant person (e.g., tallest one)
@@ -483,6 +561,28 @@ def analyze_video(
                             hip_mid_y = (left_hip_y + right_hip_y) / 2
                             pressureVerticalPositions.append(hip_mid_y)
 
+                            shoulder_mid = (
+                                (left_shoulder_x + right_shoulder_x) / 2,
+                                (left_shoulder_y + right_shoulder_y) / 2,
+                            )
+                            hip_mid = (
+                                (left_hip_x + right_hip_x) / 2,
+                                (left_hip_y + right_hip_y) / 2,
+                            )
+                            boot_mid = (
+                                (left_foot_x + right_foot_x) / 2,
+                                (left_foot_y + right_foot_y) / 2,
+                            )
+                            visible_body_height = float(np.hypot(
+                                boot_mid[0] - shoulder_mid[0],
+                                boot_mid[1] - shoulder_mid[1],
+                            ))
+                            if visible_body_height > 0:
+                                pressureRelativeHeight = (
+                                    boot_mid[1] - hip_mid[1]
+                                ) / visible_body_height
+                                pressureRelativeHeights.append(pressureRelativeHeight)
+
                             bendAngle1 = calculate_angle((navel_x, navel_y, left_foot_x, left_foot_y), (0, 0, 1, 0))
                             bendAngle2 = calculate_angle((navel_x, navel_y, right_foot_x, right_foot_y), (0, 0, 1, 0))
                             bendAngle = bendAngle1
@@ -520,6 +620,7 @@ def analyze_video(
                             ]
                             edgeAngle = sum(detected_edge_angles) / len(detected_edge_angles)
                             edgeAngles.append(edgeAngle)
+                            edgeAngleMeasured = True
 
                             # Keep this legacy vertical-based value unchanged;
                             # existing rotation scoring and turn detection use it.
@@ -623,10 +724,10 @@ def analyze_video(
                             "edge_angle": edgeAngle,
                             "pressure_angle": pressureKneeAngle,
                             "pressure_vertical_range": (
-                                min(pressureVerticalPositions[-30:]),
-                                max(pressureVerticalPositions[-30:]),
-                                pressureVerticalPositions[-1],
-                            ) if pressureVerticalPositions else None,
+                                min(pressureRelativeHeights[-30:]),
+                                max(pressureRelativeHeights[-30:]),
+                                pressureRelativeHeights[-1],
+                            ) if pressureRelativeHeights else None,
                             "rotation_angle": rotationSeparationAngle,
                             "rotation_upper_angle": rotationUpperAngle,
                             "rotation_lower_angle": rotationLowerAngle,
@@ -656,11 +757,16 @@ def analyze_video(
                 blue_score_kneeAngle = scoring.mapScore(score_kneeAngle)
                 blue_score_lateralMovement = scoring.mapScore(lateral_movement_score)
 
-                edging_angle_score.append(blue_score_skiAngle)
-                lateral_score.append(blue_score_lateralMovement)
-                bending_angle_score.append(blue_score_bendAngle)
-                knee_angle_score.append(blue_score_kneeAngle)
-                skiAngle2_score.append(blue_score_skiAngle2)
+                if skiAngle is not None:
+                    edging_angle_score.append(blue_score_skiAngle)
+                if speed is not None:
+                    lateral_score.append(blue_score_lateralMovement)
+                if bendAngle is not None:
+                    bending_angle_score.append(blue_score_bendAngle)
+                if kneeAngle is not None:
+                    knee_angle_score.append(blue_score_kneeAngle)
+                if skiAngle2 is not None and len(TskiAngles2) > 10:
+                    skiAngle2_score.append(blue_score_skiAngle2)
 
                 # Update metrics
                 metrices["ski_angle"].append(skiAngle)
@@ -670,6 +776,13 @@ def analyze_video(
                 metrices["bend_angle"].append(bendAngle)
                 metrices["knee_angle"].append(kneeAngle)
                 metrices["pressure_angle"].append(pressureKneeAngle)
+                metrices["pressure_knee_range"].append(
+                    scoring.getPressureKneeAngleRange(pressureKneeAngles)
+                )
+                metrices["pressure_relative_height"].append(pressureRelativeHeight)
+                metrices["pressure_vertical_range"].append(
+                    scoring.getPressureVerticalRange(pressureRelativeHeights)
+                )
                 metrices["rotation_angle"].append(rotationSeparationAngle)
                 metrices["rotation_upper_angle"].append(rotationUpperAngle)
                 metrices["rotation_lower_angle"].append(rotationLowerAngle)
@@ -679,25 +792,143 @@ def analyze_video(
                 metrices["tilt"].append(count_tilt)
 
                 # Calculate final Blue scores
-                Blue_edging_final, Blue_balance_final, Blue_rotation_final, Blue_pressure_final = calculate_blue_scores(
+                frame_score_details = {}
+                frame_edging_score, frame_balance_score, frame_rotation_score, frame_pressure_score = calculate_blue_scores(
                     turns, duration, TskiAngles2, edging_angle_score, lateral_score, bending_angle_score,
                     knee_angle_score, skiAngle2_score, pressure_angle_score, pressure_speed_score,
-                    rotation_separation_score, hip_shoulder, scoring, target_fps, count_tilt
+                    pressureRelativeHeights, pressureKneeAngles,
+                    rotation_separation_score, hip_shoulder,
+                    scoring, target_fps, count_tilt,
+                    score_details=frame_score_details,
                 )
+
+                frame_pillar_scores = {
+                    "pressure": frame_pressure_score,
+                    "balance": frame_balance_score,
+                    "rotation": frame_rotation_score,
+                    "edging": frame_edging_score,
+                }
+                for pillar, score in frame_pillar_scores.items():
+                    if isinstance(score, (int, float)) and np.isfinite(score):
+                        pillar_score_history[pillar].append(float(score))
+
+                running_pillar_scores = {
+                    pillar: sum(scores) / len(scores)
+                    for pillar, scores in pillar_score_history.items()
+                }
+                Blue_pressure_final = running_pillar_scores["pressure"]
+                Blue_balance_final = running_pillar_scores["balance"]
+                Blue_rotation_final = running_pillar_scores["rotation"]
+                Blue_edging_final = running_pillar_scores["edging"]
 
                 metrices["Blue_balance_final"] = Blue_balance_final
                 metrices["Blue_edging_final"] = Blue_edging_final
                 metrices["Blue_pressure_final"] = Blue_pressure_final
                 metrices["Blue_rotation_final"] = Blue_rotation_final
+
+                pressure_degree_text = (
+                    f"{pressureKneeAngle:.1f} deg"
+                    if isinstance(pressureKneeAngle, (int, float))
+                    else "N/A"
+                )
+                rotation_degree_text = (
+                    f"{rotationSeparationAngle:.1f} deg"
+                    if isinstance(rotationSeparationAngle, (int, float))
+                    else "N/A"
+                )
+                separation_component = frame_score_details.get(
+                    "rotation_separation_score"
+                )
+                separation_score_text = (
+                    f"{separation_component:.1f}/240"
+                    if isinstance(separation_component, (int, float))
+                    else "N/A"
+                )
+                ski_parallelism_angle_text = (
+                    f"{skiAngle:.1f} deg"
+                    if isinstance(skiAngle, (int, float))
+                    else "N/A"
+                )
+                edge_angle_text = (
+                    f"{edgeAngle:.1f} deg"
+                    if isinstance(edgeAngle, (int, float))
+                    else "N/A"
+                )
+                edge_angle_source = (
+                    "fresh two-ski detection"
+                    if edgeAngleMeasured
+                    else "recent fallback" if isinstance(edgeAngle, (int, float))
+                    else "unavailable"
+                )
+                lateral_movement_text = (
+                    f"{speed:.1f} px/frame"
+                    if isinstance(speed, (int, float))
+                    else "N/A"
+                )
+                edging_parallelism_component = frame_score_details[
+                    "edging_parallelism_score"
+                ]
+                edging_lateral_component = frame_score_details[
+                    "edging_lateral_score"
+                ]
+                frame_metrics_logger.info("\n".join([
+                    "=" * 72,
+                    f"FRAME {processed_frames}",
+                    "=" * 72,
+                    "PRESSURE",
+                    f"  Current frame score        : {frame_pressure_score:.1f}/240",
+                    f"  Running average (displayed): {Blue_pressure_final:.1f}/240",
+                    f"  Current knee flexion       : {pressure_degree_text}",
+                    "  Vertical movement range    : "
+                    f"{frame_score_details['pressure_vertical_range'] * 100:.2f}% body height",
+                    "  Vertical range score       : "
+                    f"{frame_score_details['pressure_vertical_score']:.1f}/240 (75%)",
+                    "  Knee flexion range         : "
+                    f"{frame_score_details['pressure_knee_range']:.1f} deg",
+                    "  Knee range score           : "
+                    f"{frame_score_details['pressure_knee_range_score']:.1f}/240 (25%)",
+                    "-" * 72,
+                    "ROTATION",
+                    f"  Current frame score        : {frame_rotation_score:.1f}/240",
+                    f"  Running average (displayed): {Blue_rotation_final:.1f}/240",
+                    f"  Body separation degree    : {rotation_degree_text}",
+                    f"  Body separation score     : {separation_score_text} (70%)",
+                    "  Direction-change score     : "
+                    f"{frame_score_details['rotation_direction_change_score']:.1f}/240 (10%)",
+                    "  Lateral-movement score     : "
+                    f"{frame_score_details['rotation_lateral_score']:.1f}/240 (20%)",
+                    "-" * 72,
+                    "EDGING",
+                    f"  Current frame score        : {frame_edging_score:.1f}/240",
+                    f"  Running average (displayed): {Blue_edging_final:.1f}/240",
+                    f"  Ski parallelism angle      : {ski_parallelism_angle_text}",
+                    "  Parallelism component      : "
+                    f"{edging_parallelism_component:.1f}/240 x 70% = "
+                    f"{0.70 * edging_parallelism_component:.1f}",
+                    f"  Edge angle ({edge_angle_source}) : {edge_angle_text}",
+                    "  Edge-angle scoring         : ignored (display only)",
+                    f"  Lateral movement           : {lateral_movement_text}",
+                    "  Lateral component          : "
+                    f"{edging_lateral_component:.1f}/240 x 30% = "
+                    f"{0.30 * edging_lateral_component:.1f}",
+                ]))
+
                 score_timeline.append({
                     "time_seconds": round(processed_frames / output_fps, 2),
-                    "pressure": Blue_pressure_final,
-                    "balance": Blue_balance_final,
-                    "rotation": Blue_rotation_final,
-                    "edging": Blue_edging_final,
+                    "pressure": frame_pressure_score,
+                    "balance": frame_balance_score,
+                    "rotation": frame_rotation_score,
+                    "edging": frame_edging_score,
                     "ski_parallel_control": skiAngle,
-                    "edge_control": skiAngle2,
+                    "edge_control": edgeAngle,
                     "rotation_separation": rotationSeparationAngle,
+                    "pressure_relative_height": pressureRelativeHeight,
+                    "pressure_vertical_range": scoring.getPressureVerticalRange(
+                        pressureRelativeHeights
+                    ),
+                    "pressure_knee_range": scoring.getPressureKneeAngleRange(
+                        pressureKneeAngles
+                    ),
                     "upper_body_alignment": hipAngle,
                     "athletic_stance_knee": kneeAngle,
                     "athletic_stance_bend": bendAngle,
@@ -762,6 +993,7 @@ def analyze_video(
 
             except Exception as e:
                 logger.error(f"Error processing frame {frame_count}: {e}")
+                frame_count += 1
                 continue
 
             frame_count += 1
@@ -868,10 +1100,20 @@ def analyze_video(
     # Final calculations
     logger.info("Calculating final scores...")
     try:
-        Blue_edging_final, Blue_balance_final, Blue_rotation_final, Blue_pressure_final = calculate_blue_scores(
-            turns, duration, TskiAngles2, edging_angle_score, lateral_score, bending_angle_score,
-            knee_angle_score, skiAngle2_score, pressure_angle_score, pressure_speed_score,
-            rotation_separation_score, hip_shoulder, scoring, target_fps, count_tilt
+        if not pillar_score_history["pressure"]:
+            raise ValueError("No valid frame scores were produced for this video")
+
+        Blue_pressure_final = sum(pillar_score_history["pressure"]) / len(
+            pillar_score_history["pressure"]
+        )
+        Blue_balance_final = sum(pillar_score_history["balance"]) / len(
+            pillar_score_history["balance"]
+        )
+        Blue_rotation_final = sum(pillar_score_history["rotation"]) / len(
+            pillar_score_history["rotation"]
+        )
+        Blue_edging_final = sum(pillar_score_history["edging"]) / len(
+            pillar_score_history["edging"]
         )
 
         logger.info(f"Final Scores:")
