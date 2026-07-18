@@ -1,7 +1,49 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import TrendsChart from "./TrendsChart";
+import RunAnalysisGraph from "./RunAnalysisGraph";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
+const DASHBOARD_REFRESH_MS = 5000;
+
+function useAutoRefresh(refresh, enabled = true) {
+  const refreshRef = useRef(refresh);
+
+  useEffect(() => {
+    refreshRef.current = refresh;
+  }, [refresh]);
+
+  useEffect(() => {
+    if (!enabled) return undefined;
+
+    let refreshInProgress = false;
+    const runRefresh = async () => {
+      if (refreshInProgress || document.visibilityState === "hidden") return;
+
+      refreshInProgress = true;
+      try {
+        await refreshRef.current();
+      } catch {
+        // A later poll will retry. Initial page loads still surface API errors.
+      } finally {
+        refreshInProgress = false;
+      }
+    };
+
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === "visible") runRefresh();
+    };
+    const timer = window.setInterval(runRefresh, DASHBOARD_REFRESH_MS);
+
+    window.addEventListener("focus", runRefresh);
+    document.addEventListener("visibilitychange", refreshWhenVisible);
+
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener("focus", runRefresh);
+      document.removeEventListener("visibilitychange", refreshWhenVisible);
+    };
+  }, [enabled]);
+}
 
 function Logo() {
   return (
@@ -187,7 +229,7 @@ function ScorePill({ score }) {
   return <span className={`score-pill ${key}`}>{label}</span>;
 }
 
-function AttemptCard({ attempt }) {
+function AttemptCard({ attempt, onViewAnalysis }) {
   const blueIq = Math.ceil(
     Number(attempt.blue_iq_score || (Number(attempt.pressure_score || 0) + Number(attempt.balance_score || 0) + Number(attempt.rotation_score || 0) + Number(attempt.edging_score || 0)) / 4)
   );
@@ -209,6 +251,9 @@ function AttemptCard({ attempt }) {
         <span>Edging <b>{Math.ceil(attempt.edging_score || 0)}</b></span>
       </div>
       <div className="card-actions">
+        {onViewAnalysis && (
+          <button type="button" onClick={() => onViewAnalysis(attempt)}>View graph</button>
+        )}
         {video && <a href={video} target="_blank" rel="noreferrer">View video</a>}
         {report && <a href={report} target="_blank" rel="noreferrer">View report</a>}
       </div>
@@ -222,6 +267,11 @@ function ClientDashboard() {
   const [displayCount, setDisplayCount] = useState(4); // Show 4 initially
   const [user, setUser] = useState(null);
   const [error, setError] = useState("");
+
+  async function loadAttempts() {
+    const history = await api("/me/attempts", { token });
+    setAttempts(history);
+  }
 
   useEffect(() => {
     if (!token) {
@@ -238,6 +288,8 @@ function ClientDashboard() {
       })
       .catch((err) => setError(err.message));
   }, [token]);
+
+  useAutoRefresh(loadAttempts, Boolean(token));
 
   const latest = attempts[0];
   const displayedAttempts = attempts.slice(0, displayCount);
@@ -265,7 +317,13 @@ function ClientDashboard() {
           <strong>{latest ? Math.ceil(latest.blue_iq_score || 0) : "--"}</strong>
         </div>
       </section>
-      {attempts.length >= 2 && <TrendsChart api={api} token={token} />}
+      {attempts.length >= 2 && (
+        <TrendsChart
+          api={api}
+          token={token}
+          refreshKey={latest?.id || attempts.length}
+        />
+      )}
       <section className="section-block">
         <div className="section-heading">
           <h2>Your analysis history</h2>
@@ -294,6 +352,7 @@ function AdminDashboard() {
   const [selectedClient, setSelectedClient] = useState(""); // Track selected client filter
   const [error, setError] = useState("");
   const [uploadState, setUploadState] = useState("");
+  const [graphAttempt, setGraphAttempt] = useState(null);
 
   async function loadData() {
     const [userRows, attemptRows] = await Promise.all([
@@ -304,6 +363,11 @@ function AdminDashboard() {
     setAttempts(attemptRows);
   }
 
+  async function loadAttempts() {
+    const attemptRows = await api("/admin/attempts", { token });
+    setAttempts(attemptRows);
+  }
+
   useEffect(() => {
     if (!token) {
       routeTo("/admin-login");
@@ -311,6 +375,8 @@ function AdminDashboard() {
     }
     loadData().catch((err) => setError(err.message));
   }, [token]);
+
+  useAutoRefresh(loadAttempts, Boolean(token));
 
   async function pollJobStatus(jobId) {
     const maxAttempts = 120; // Poll for up to 10 minutes (120 * 5 seconds)
@@ -475,7 +541,13 @@ function AdminDashboard() {
           </div>
         </div>
         <div className="cards-grid">
-          {displayedAttempts.length ? displayedAttempts.map((attempt) => <AttemptCard key={attempt.id} attempt={attempt} />) : <EmptyState text="No attempts have been generated yet." />}
+          {displayedAttempts.length ? displayedAttempts.map((attempt) => (
+            <AttemptCard
+              key={attempt.id}
+              attempt={attempt}
+              onViewAnalysis={setGraphAttempt}
+            />
+          )) : <EmptyState text="No attempts have been generated yet." />}
         </div>
         {hasMore && (
           <div style={{ textAlign: 'center', marginTop: '24px' }}>
@@ -485,6 +557,15 @@ function AdminDashboard() {
           </div>
         )}
       </section>
+      {graphAttempt && (
+        <RunAnalysisGraph
+          api={api}
+          token={token}
+          attempt={graphAttempt}
+          athleteName={users.find((user) => user.id === graphAttempt.person_id)?.name}
+          onClose={() => setGraphAttempt(null)}
+        />
+      )}
     </main>
   );
 }

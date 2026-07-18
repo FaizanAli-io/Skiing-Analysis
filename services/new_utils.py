@@ -2,6 +2,8 @@ import cv2
 import numpy as np
 import os
 
+from services.metric_colors import METRIC_COLORS_BGR
+
 TARGET_WIDTH = 1280
 TARGET_HEIGHT = 720
 
@@ -86,18 +88,40 @@ class SkierScoring:
         return int(score)
 
 
-    def getLateralMovementScore(self,speed, max_score=150, min_score=0, min_speed=0, max_speed=40):
+    def getLateralMovementScore(
+        self,
+        speed,
+        max_score=180,
+        min_score=0,
+        min_speed=0,
+        max_speed=45,
+        low_speed_threshold=30,
+        low_speed_lambda=2.0,
+    ):
+        """Score lateral speed with a stronger penalty below 30 px/frame.
+
+        The returned 0-180 score is later mapped to the 60-240 Blue IQ scale.
+        Thirty px/frame maps to the midpoint (150 Blue IQ), while 45 or more
+        maps to 240.
+        """
         if speed < 0:
-            return 0
+            return min_score
 
         if speed <= min_speed:
             return min_score
         elif speed >= max_speed:
             return max_score
 
-        # Linear interpolation
-        slope = (max_score - min_score) / (max_speed - min_speed)
-        score = slope * (speed - min_speed) + min_score
+        threshold = min(max(float(low_speed_threshold), min_speed), max_speed)
+        midpoint_score = min_score + 0.5 * (max_score - min_score)
+        if speed <= threshold:
+            ratio = (speed - min_speed) / max(threshold - min_speed, 1e-6)
+            score = min_score + (
+                midpoint_score - min_score
+            ) * (ratio ** low_speed_lambda)
+        else:
+            ratio = (speed - threshold) / max(max_speed - threshold, 1e-6)
+            score = midpoint_score + ratio * (max_score - midpoint_score)
 
         return int(score)
 
@@ -586,30 +610,35 @@ def draw_pose_connections(frame, coords):
     ) = coords
 
 
-   # Draw keypoints
-    cv2.circle(frame, (navel_x, navel_y), 5, (0, 255, 255), -1)
-    cv2.circle(frame, (left_foot_x, left_foot_y), 5, (0, 0, 255), -1)
-    cv2.circle(frame, (right_foot_x, right_foot_y), 5, (0, 0, 255), -1)
-    cv2.circle(frame, (left_knee_x, left_knee_y), 5, (203, 192, 255), -1)
-    cv2.circle(frame, (right_knee_x, right_knee_y), 5, (203, 192, 255), -1)
-    cv2.circle(frame, (left_hip_x, left_hip_y), 5, (255, 0, 255), -1)
-    cv2.circle(frame, (right_hip_x, right_hip_y), 5, (0, 255, 255), -1)
-
-    # Draw lines
-    cv2.line(frame, (navel_x, navel_y), (left_foot_x, left_foot_y), (255, 0, 0), 2)
-    cv2.line(frame, (navel_x, navel_y), (right_foot_x, right_foot_y), (255, 0, 0), 2)
-    cv2.line(frame, (navel_x, navel_y), (left_knee_x, left_knee_y), (203, 192, 255), 2)
-    cv2.line(frame, (left_knee_x, left_knee_y), (left_foot_x, left_foot_y), (203, 192, 255), 2)
-    cv2.line(frame, (navel_x, navel_y), (right_knee_x, right_knee_y), (203, 192, 255), 2)
-    cv2.line(frame, (right_knee_x, right_knee_y), (right_foot_x, right_foot_y), (203, 192, 255), 2)
-
-    cv2.line(frame, (left_shoulder_x, left_shoulder_y), (right_shoulder_x, right_shoulder_y), (0, 255, 0), 2)
-    cv2.line(frame, (left_hip_x, left_hip_y), (right_hip_x, right_hip_y), (255, 255, 0), 2)
-    cv2.line(frame, (left_shoulder_x, left_shoulder_y), (left_hip_x, left_hip_y), (128, 0, 128), 2)
-    cv2.line(frame, (right_shoulder_x, right_shoulder_y), (right_hip_x, right_hip_y), (128, 0, 128), 2)
-    cv2.line(frame, (left_hip_x, left_hip_y), (left_knee_x, left_knee_y), (0, 255, 255), 2)
-    cv2.line(frame, (right_hip_x, right_hip_y), (right_knee_x, right_knee_y), (0, 255, 255), 2)
-
+    # Keep pose context deliberately faint so metric colors remain dominant.
+    pose_layer = frame.copy()
+    pose_color = (190, 190, 190)
+    keypoints = (
+        (navel_x, navel_y),
+        (left_foot_x, left_foot_y),
+        (right_foot_x, right_foot_y),
+        (left_knee_x, left_knee_y),
+        (right_knee_x, right_knee_y),
+        (left_hip_x, left_hip_y),
+        (right_hip_x, right_hip_y),
+    )
+    connections = (
+        ((navel_x, navel_y), (left_knee_x, left_knee_y)),
+        ((left_knee_x, left_knee_y), (left_foot_x, left_foot_y)),
+        ((navel_x, navel_y), (right_knee_x, right_knee_y)),
+        ((right_knee_x, right_knee_y), (right_foot_x, right_foot_y)),
+        ((left_shoulder_x, left_shoulder_y), (right_shoulder_x, right_shoulder_y)),
+        ((left_hip_x, left_hip_y), (right_hip_x, right_hip_y)),
+        ((left_shoulder_x, left_shoulder_y), (left_hip_x, left_hip_y)),
+        ((right_shoulder_x, right_shoulder_y), (right_hip_x, right_hip_y)),
+        ((left_hip_x, left_hip_y), (left_knee_x, left_knee_y)),
+        ((right_hip_x, right_hip_y), (right_knee_x, right_knee_y)),
+    )
+    for point in keypoints:
+        cv2.circle(pose_layer, point, 3, pose_color, -1, cv2.LINE_AA)
+    for start, end in connections:
+        cv2.line(pose_layer, start, end, pose_color, 1, cv2.LINE_AA)
+    cv2.addWeighted(pose_layer, 0.28, frame, 0.72, 0, frame)
 
     return frame
 
@@ -656,16 +685,70 @@ def _draw_joint_angle_arc(frame, vertex, point_a, point_b, color, radius=24):
     )
 
 
+def _draw_metric_legend(frame):
+    """Draw the four metric identities using the shared vector colors."""
+    items = (
+        ("EDGING", METRIC_COLORS_BGR["edging"]),
+        ("PRESSURE", METRIC_COLORS_BGR["pressure"]),
+        ("ROTATION", METRIC_COLORS_BGR["rotation"]),
+        ("BALANCE", METRIC_COLORS_BGR["balance"]),
+    )
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    scale = 0.34
+    thickness = 1
+    gap = 14
+    dot_diameter = 7
+    text_widths = [
+        cv2.getTextSize(label, font, scale, thickness)[0][0]
+        for label, _ in items
+    ]
+    content_width = sum(dot_diameter + 5 + width for width in text_widths)
+    content_width += gap * (len(items) - 1)
+    box_width = content_width + 20
+    box_height = 28
+    x = max(8, frame.shape[1] - box_width - 12)
+    y = 12
+
+    panel = frame.copy()
+    cv2.rectangle(panel, (x, y), (x + box_width, y + box_height), (8, 18, 34), -1)
+    cv2.addWeighted(panel, 0.72, frame, 0.28, 0, frame)
+    cursor_x = x + 10
+    baseline_y = y + 19
+    for (label, color), text_width in zip(items, text_widths):
+        cv2.circle(
+            frame,
+            (cursor_x + dot_diameter // 2, y + box_height // 2),
+            dot_diameter // 2,
+            color,
+            -1,
+            cv2.LINE_AA,
+        )
+        cursor_x += dot_diameter + 5
+        cv2.putText(
+            frame,
+            label,
+            (cursor_x, baseline_y),
+            font,
+            scale,
+            color,
+            thickness,
+            cv2.LINE_AA,
+        )
+        cursor_x += text_width + gap
+
+
 def draw_biomechanics_overlay(frame, body_points, ski_lines, metrics):
     """Draw coach-mode visual guides for the live biomechanics values.
 
     This is display-only and does not alter scoring inputs.
     """
     try:
-        guide = (190, 230, 255)
-        accent = (255, 175, 106)
-        pressure_color = (94, 197, 34)
-        rotation_color = (11, 158, 245)
+        body_points = body_points or {}
+        guide = (190, 190, 190)
+        edging_color = METRIC_COLORS_BGR["edging"]
+        pressure_color = METRIC_COLORS_BGR["pressure"]
+        rotation_color = METRIC_COLORS_BGR["rotation"]
+        balance_color = METRIC_COLORS_BGR["balance"]
         white = (245, 250, 255)
 
         # Body alignment: shoulder midpoint to hip midpoint.
@@ -709,6 +792,61 @@ def draw_biomechanics_overlay(frame, body_points, ski_lines, metrics):
                     rotation_color,
                 )
 
+        # Balance: CoM proxy, vertical plumb, support offset, and short trail.
+        balance_com = metrics.get("balance_com")
+        balance_support = metrics.get("balance_support")
+        balance_plumb = metrics.get("balance_plumb")
+        balance_trail = metrics.get("balance_trail") or ()
+        if balance_com and balance_support and balance_plumb:
+            trail_layer = frame.copy()
+            trail_count = len(balance_trail)
+            for index, trail_point in enumerate(balance_trail):
+                strength = (index + 1) / max(1, trail_count)
+                trail_color = tuple(
+                    int(channel * (0.30 + 0.70 * strength))
+                    for channel in balance_color
+                )
+                cv2.circle(
+                    trail_layer,
+                    trail_point,
+                    max(2, int(round(2 + 2 * strength))),
+                    trail_color,
+                    -1,
+                    cv2.LINE_AA,
+                )
+            cv2.addWeighted(trail_layer, 0.60, frame, 0.40, 0, frame)
+
+            cv2.line(
+                frame,
+                balance_com,
+                balance_plumb,
+                balance_color,
+                2,
+                cv2.LINE_AA,
+            )
+            cv2.line(
+                frame,
+                balance_plumb,
+                balance_support,
+                balance_color,
+                2,
+                cv2.LINE_AA,
+            )
+            cv2.circle(frame, balance_com, 7, white, -1, cv2.LINE_AA)
+            cv2.circle(frame, balance_com, 7, balance_color, 2, cv2.LINE_AA)
+            cv2.circle(frame, balance_support, 5, balance_color, -1, cv2.LINE_AA)
+            cv2.circle(frame, balance_plumb, 4, balance_color, -1, cv2.LINE_AA)
+
+            balance_angle = metrics.get("balance_angle")
+            if isinstance(balance_angle, (int, float)):
+                _draw_biomech_label(
+                    frame,
+                    f"Balance {balance_angle:.0f} deg",
+                    balance_com[0] + 14,
+                    balance_com[1] - 16,
+                    balance_color,
+                )
+
         # Pressure: thigh and shin vectors with knee flexion angle.
         if left_hip and left_knee and left_foot:
             cv2.line(frame, left_hip, left_knee, pressure_color, 3, cv2.LINE_AA)
@@ -738,9 +876,9 @@ def draw_biomechanics_overlay(frame, body_points, ski_lines, metrics):
             bar_x = min(frame.shape[1] - 12, right_hip[0] + 42)
             bar_top = max(12, right_hip[1] - 32)
             bar_bottom = min(frame.shape[0] - 12, right_hip[1] + 32)
-            cv2.line(frame, (bar_x, bar_top), (bar_x, bar_bottom), guide, 2, cv2.LINE_AA)
-            cv2.line(frame, (bar_x - 5, bar_top), (bar_x + 5, bar_top), guide, 2, cv2.LINE_AA)
-            cv2.line(frame, (bar_x - 5, bar_bottom), (bar_x + 5, bar_bottom), guide, 2, cv2.LINE_AA)
+            cv2.line(frame, (bar_x, bar_top), (bar_x, bar_bottom), pressure_color, 2, cv2.LINE_AA)
+            cv2.line(frame, (bar_x - 5, bar_top), (bar_x + 5, bar_top), pressure_color, 2, cv2.LINE_AA)
+            cv2.line(frame, (bar_x - 5, bar_bottom), (bar_x + 5, bar_bottom), pressure_color, 2, cv2.LINE_AA)
             if range_max > range_min:
                 ratio = (current - range_min) / (range_max - range_min)
             else:
@@ -750,26 +888,29 @@ def draw_biomechanics_overlay(frame, body_points, ski_lines, metrics):
             marker_y = int(bar_top + (1.0 - ratio) * (bar_bottom - bar_top))
             cv2.circle(frame, (bar_x, marker_y), 5, pressure_color, -1, cv2.LINE_AA)
 
-        # Edging: ski base against the horizontal carpet reference.
-        if ski_lines:
-            first_line = ski_lines[0]
-            x1, y1, x2, y2 = first_line
-            cv2.line(frame, (x1, y1), (x2, y2), accent, 3, cv2.LINE_AA)
-            mid_x, mid_y = _line_midpoint(first_line)
-            ref_len = 70
-            cv2.line(frame, (mid_x - ref_len // 2, mid_y), (mid_x + ref_len // 2, mid_y), white, 1, cv2.LINE_AA)
-            edge_angle = metrics.get("edge_angle")
-            if isinstance(edge_angle, (int, float)):
-                _draw_biomech_label(frame, f"Edging {edge_angle:.0f} deg", mid_x + 12, mid_y - 18, accent)
-
+        # Edging proxy: ski parallelism, measured as the angle between skis.
+        for line in ski_lines:
+            x1, y1, x2, y2 = line
+            cv2.line(frame, (x1, y1), (x2, y2), edging_color, 3, cv2.LINE_AA)
         if len(ski_lines) >= 2:
             mid_a = _line_midpoint(ski_lines[0])
             mid_b = _line_midpoint(ski_lines[1])
-            cv2.line(frame, mid_a, mid_b, white, 2, cv2.LINE_AA)
-            cv2.circle(frame, mid_a, 4, white, -1, cv2.LINE_AA)
-            cv2.circle(frame, mid_b, 4, white, -1, cv2.LINE_AA)
-            # This connector shows ski separation, not edge angle, so it stays
-            # unlabeled until the parallel-control presentation is defined.
+            cv2.line(frame, mid_a, mid_b, edging_color, 2, cv2.LINE_AA)
+            cv2.circle(frame, mid_a, 4, edging_color, -1, cv2.LINE_AA)
+            cv2.circle(frame, mid_b, 4, edging_color, -1, cv2.LINE_AA)
+            ski_parallelism = metrics.get("ski_separation")
+            if isinstance(ski_parallelism, (int, float)):
+                label_x = (mid_a[0] + mid_b[0]) // 2 + 12
+                label_y = min(mid_a[1], mid_b[1]) - 14
+                _draw_biomech_label(
+                    frame,
+                    f"Edging {ski_parallelism:.0f} deg",
+                    label_x,
+                    label_y,
+                    edging_color,
+                )
+
+        _draw_metric_legend(frame)
 
     except Exception:
         return frame
@@ -884,8 +1025,14 @@ def detect_ski_lines(frame, ski_boxes, flag, rotation_angle=0):
                 x1_l, x2_l = x1_l + x1, x2_l + x1
                 y1_l, y2_l = y1_l + y1, y2_l + y1
 
-                ski_color = (255, 165, 0) if idx == 0 else (0, 165, 255)
-                cv2.line(frame, (x1_l, y1_l), (x2_l, y2_l), ski_color, 4)
+                cv2.line(
+                    frame,
+                    (x1_l, y1_l),
+                    (x2_l, y2_l),
+                    METRIC_COLORS_BGR["edging"],
+                    4,
+                    cv2.LINE_AA,
+                )
 
                 ski_lines.append((x1_l, y1_l, x2_l, y2_l))
 
@@ -905,6 +1052,7 @@ def calculate_blue_scores(
     pressure_speed_score,
     pressure_relative_heights,
     pressure_knee_angles,
+    balance_score,
     rotation_separation_score,
     hip_shoulder,
     scoring,
@@ -939,9 +1087,17 @@ def calculate_blue_scores(
             score_turnTime = 0
             score_noOfTurns = 0
 
+    # Smooth the current lateral signal over at most five valid measurements.
+    # During startup, use every available value; before the first valid speed,
+    # use the 60-point Blue IQ baseline.
+    recent_lateral_scores = lateral_score[-5:]
+    recent_lateral_score = (
+        sum(recent_lateral_scores) / len(recent_lateral_scores)
+        if recent_lateral_scores else 60.0
+    )
+
     # Removing outliers
     edging_angle_score = remove_outliers(edging_angle_score)
-    lateral_score = remove_outliers(lateral_score)
     bending_angle_score = remove_outliers(bending_angle_score)
     knee_angle_score = remove_outliers(knee_angle_score)
     skiAngle2_score = remove_outliers(skiAngle2_score)
@@ -951,11 +1107,9 @@ def calculate_blue_scores(
 
     knee_angle_score = getMax50Percent(knee_angle_score)
     bending_angle_score = getMax50Percent(bending_angle_score)
-    lateral_score = getMax50Percent(lateral_score)
 
     # Averages
     avg_edging_angle_score = sum(edging_angle_score) / len(edging_angle_score) if edging_angle_score else 0
-    avg_lateral_score = sum(lateral_score) / len(lateral_score) if lateral_score else 0
     avg_bending_angle_score = sum(bending_angle_score) / len(bending_angle_score) if bending_angle_score else 0
     avg_knee_angle_score = sum(knee_angle_score) / len(knee_angle_score) if knee_angle_score else 0
     avg_skiAngle2_score = sum(skiAngle2_score) / len(skiAngle2_score) if skiAngle2_score else 0
@@ -972,18 +1126,26 @@ def calculate_blue_scores(
     # Edging scoring
     Blue_edging_score = (
         0.70 * avg_edging_angle_score +
-        0.30 * avg_lateral_score
+        0.30 * recent_lateral_score
     )
     Blue_edging_final = Blue_edging_score
 
-    # Balance scoring
-    Blue_balance_score = (
-        0.3 * avg_bending_angle_score +
-        0.3 * avg_knee_angle_score +
-        0.3 * score_turnTime +
-        0.1 * avg_shoulder_hip_score
+    # Legacy Balance scoring retained for comparison and rollback.
+    # Blue_balance_score = (
+    #     0.3 * avg_bending_angle_score
+    #     + 0.3 * avg_knee_angle_score
+    #     + 0.3 * score_turnTime
+    #     + 0.1 * avg_shoulder_hip_score
+    # )
+    # Blue_balance_final = Blue_balance_score
+
+    # The active Balance score is calculated independently by BalanceTracker
+    # from normalized CoM lateral spread, smoothness, and rhythm.
+    Blue_balance_final = (
+        float(np.clip(balance_score, 60.0, 240.0))
+        if isinstance(balance_score, (int, float)) and np.isfinite(balance_score)
+        else None
     )
-    Blue_balance_final = Blue_balance_score
 
     # Rotation scoring: body-separation dynamics is the primary signal.
     rotation_separation_component = (
@@ -992,8 +1154,8 @@ def calculate_blue_scores(
         else 60.0
     )
     Blue_rotation_final = float(np.clip(
-        0.70 * rotation_separation_component
-        + 0.20 * avg_lateral_score
+        0.60 * rotation_separation_component
+        + 0.30 * recent_lateral_score
         + 0.10 * avg_skiAngle2_score,
         60.0,
         240.0,
@@ -1042,9 +1204,9 @@ def calculate_blue_scores(
             "pressure_knee_range_score": pressure_knee_range_score,
             "rotation_separation_score": avg_rotation_separation_score,
             "rotation_direction_change_score": avg_skiAngle2_score,
-            "rotation_lateral_score": avg_lateral_score,
+            "rotation_lateral_score": recent_lateral_score,
             "edging_parallelism_score": avg_edging_angle_score,
-            "edging_lateral_score": avg_lateral_score,
+            "edging_lateral_score": recent_lateral_score,
         })
 
 

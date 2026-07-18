@@ -45,10 +45,25 @@ def _reset_frame_metrics_log():
     file_handler.setFormatter(logging.Formatter("%(message)s"))
     frame_metrics_logger.addHandler(file_handler)
 
+
+def _ski_separation_fallback(valid_angles, consecutive_misses):
+    """Return a fallback based only on the latest five real detections."""
+    if not valid_angles:
+        return None
+
+    recent_angles = valid_angles[-5:]
+    recent_average = sum(recent_angles) / len(recent_angles)
+    if consecutive_misses <= 5:
+        return recent_average
+
+    penalty = 4.0 + ((consecutive_misses - 6) // 2)
+    return recent_average + penalty
+
 # Suppress ultralytics verbose logging
 logging.getLogger('ultralytics').setLevel(logging.WARNING)
 
 from services.new_utils import *
+from services.balance_metrics import BalanceTracker
 
 metrices = {
     "hip_angle" : [],
@@ -63,6 +78,14 @@ metrices = {
     "rotation_angle" : [],
     "rotation_upper_angle" : [],
     "rotation_lower_angle" : [],
+    "balance_offset" : [],
+    "balance_angle" : [],
+    "balance_lateral_spread" : [],
+    "balance_spread_score" : [],
+    "balance_movement_range" : [],
+    "balance_range_score" : [],
+    "balance_smoothness_score" : [],
+    "balance_rhythm_score" : [],
     "bend_angle" : [],
     "ski_angle" : [],
     "ski_angle2" : [],
@@ -76,6 +99,7 @@ metrices = {
 
 from services.overlay_renderers import create_overlay, create_premium_overlay, get_unique_output_path, write_react_overlay_page
 from services.report_generator import generate_basic_report
+from services.analysis_timeline import build_timeline_sample, create_timeline_payload
 
 
 def _safe_filename_part(value: Any) -> str:
@@ -221,6 +245,7 @@ def analyze_video(
         index_counter = 0
         hip_shoulder = []
         skiAngles = []
+        ski_separation_missed_frames = 0
         skiAngle = None
         skiAngle2 = None
         TskiAngles2 = []
@@ -245,6 +270,7 @@ def analyze_video(
         side = None
         turns = 0
         scoring = SkierScoring()
+        balance_tracker = BalanceTracker(target_fps=target_fps)
 
         # Initialize score variables
         score_skiAngle = 0
@@ -380,6 +406,7 @@ def analyze_video(
                 bendAngle = None
                 pressureKneeAngle = None
                 pressureRelativeHeight = None
+                balance_measurement = None
                 skiAngle = None
                 skiAngle2 = None
                 edgeAngleMeasured = False
@@ -469,6 +496,8 @@ def analyze_video(
                             navel_y = int((landmarks[23].y + landmarks[24].y) / 2 * h)
                             left_foot_x, left_foot_y = int(landmarks[27].x * w), int(landmarks[27].y * h)
                             right_foot_x, right_foot_y = int(landmarks[28].x * w), int(landmarks[28].y * h)
+                            left_toe_x, left_toe_y = int(landmarks[31].x * w), int(landmarks[31].y * h)
+                            right_toe_x, right_toe_y = int(landmarks[32].x * w), int(landmarks[32].y * h)
                             left_knee_x, left_knee_y = int(landmarks[25].x * w), int(landmarks[25].y * h)
                             right_knee_x, right_knee_y = int(landmarks[26].x * w), int(landmarks[26].y * h)
 
@@ -483,12 +512,18 @@ def analyze_video(
                                 "navel": (navel_x, navel_y),
                                 "left_foot": (left_foot_x, left_foot_y),
                                 "right_foot": (right_foot_x, right_foot_y),
+                                "left_toe": (left_toe_x, left_toe_y),
+                                "right_toe": (right_toe_x, right_toe_y),
                                 "left_knee": (left_knee_x, left_knee_y),
                                 "right_knee": (right_knee_x, right_knee_y),
                                 "left_shoulder": (left_shoulder_x, left_shoulder_y),
                                 "right_shoulder": (right_shoulder_x, right_shoulder_y),
                                 "left_hip": (left_hip_x, left_hip_y),
                                 "right_hip": (right_hip_x, right_hip_y),
+                                "balance_visibility": min(
+                                    landmarks[index].visibility
+                                    for index in (11, 12, 23, 24, 27, 28)
+                                ),
                             }
 
                             # Draw pose connections
@@ -526,7 +561,15 @@ def analyze_video(
                             if speed is not None:
                                 if speed > 55:
                                     speed = 55
-                                speed_score = scoring.getLateralMovementScore(speed, 100, 0, 0, 40)
+                                speed_score = scoring.getLateralMovementScore(
+                                    speed,
+                                    max_score=100,
+                                    min_score=0,
+                                    min_speed=0,
+                                    max_speed=45,
+                                    low_speed_threshold=30,
+                                    low_speed_lambda=2.0,
+                                )
                                 logger.debug(f"Speed: {speed:.2f}, Speed Score: {speed_score}")
                                 pressure_speed_score.append(speed_score)
 
@@ -601,6 +644,7 @@ def analyze_video(
                 flag = False
                 ski_lines = []
                 edgeAngle = None
+                ski_separation_measured = False
                 if ski_boxes:
                     logger.debug(f"Processing {len(ski_boxes)} ski boxes")
                     try:
@@ -608,8 +652,13 @@ def analyze_video(
                         skiAngle = None
 
                         if len(ski_lines) == 2:
-                            skiAngle = calculate_angle(ski_lines[0], ski_lines[1])
-                            skiAngles.append(skiAngle)
+                            measured_ski_angle = calculate_angle(
+                                ski_lines[0], ski_lines[1]
+                            )
+                            skiAngle = measured_ski_angle
+                            if np.isfinite(measured_ski_angle):
+                                skiAngles.append(skiAngle)
+                                ski_separation_measured = True
                             logger.debug(f"Angle between skis: {skiAngle:.2f}Â°")
 
                             # Average both ski bases against the horizontal
@@ -640,7 +689,6 @@ def analyze_video(
                                 avg_count = min(len(skiAngles), 10)
                                 if avg_count != 0:
                                     skiAngle = sum(skiAngles[-avg_count:]) / avg_count
-                                    skiAngles.append(skiAngle)
                                     logger.debug(f"Estimated ski angle: {skiAngle:.2f}Â°")
 
                         else:
@@ -651,7 +699,6 @@ def analyze_video(
                                 avg_count = min(len(skiAngles), 10)
                                 if avg_count != 0:
                                     skiAngle = sum(skiAngles[-avg_count:]) / avg_count
-                                    skiAngles.append(skiAngle)
 
                     except Exception as e:
                         logger.warning(f"Error processing ski lines: {e}")
@@ -665,7 +712,15 @@ def analyze_video(
                         avg_count = min(len(skiAngles), 10)
                         if avg_count != 0:
                             skiAngle = sum(skiAngles[-avg_count:]) / avg_count
-                            skiAngles.append(skiAngle)
+
+                if ski_separation_measured:
+                    ski_separation_missed_frames = 0
+                else:
+                    ski_separation_missed_frames += 1
+                    skiAngle = _ski_separation_fallback(
+                        skiAngles,
+                        ski_separation_missed_frames,
+                    )
 
                 # Rotation proxy for a single front-facing camera. Compare the
                 # signed lean of hip-to-shoulder and hip-to-boot midpoint lines.
@@ -714,14 +769,23 @@ def analyze_video(
                     avg_count = min(len(rotationSeparationAngles), 10)
                     rotationSeparationAngle = sum(rotationSeparationAngles[-avg_count:]) / avg_count
 
-                if display_mode == "coach" and biomech_body_points:
+                # New Balance path: keep CoM analysis independent from the
+                # commented legacy Balance formula in calculate_blue_scores.
+                balance_measurement = balance_tracker.update(
+                    biomech_body_points,
+                    frame.shape,
+                )
+                balance_visual = balance_tracker.visual_measurement()
+
+                if display_mode == "coach" and (
+                    biomech_body_points or balance_visual or ski_lines
+                ):
                     frame = draw_biomechanics_overlay(
                         frame,
-                        biomech_body_points,
+                        biomech_body_points or {},
                         ski_lines,
                         {
                             "ski_separation": skiAngle,
-                            "edge_angle": edgeAngle,
                             "pressure_angle": pressureKneeAngle,
                             "pressure_vertical_range": (
                                 min(pressureRelativeHeights[-30:]),
@@ -731,6 +795,19 @@ def analyze_video(
                             "rotation_angle": rotationSeparationAngle,
                             "rotation_upper_angle": rotationUpperAngle,
                             "rotation_lower_angle": rotationLowerAngle,
+                            "balance_com": (
+                                balance_visual.com_point if balance_visual else None
+                            ),
+                            "balance_support": (
+                                balance_visual.support_point if balance_visual else None
+                            ),
+                            "balance_plumb": (
+                                balance_visual.plumb_point if balance_visual else None
+                            ),
+                            "balance_angle": (
+                                balance_visual.offset_angle if balance_visual else None
+                            ),
+                            "balance_trail": balance_tracker.trail_points(),
                             "hip_angle": hipAngle,
                             "bend_angle": bendAngle,
                         },
@@ -746,7 +823,15 @@ def analyze_video(
                     score_skiAngle2 = scoring.getSkiAngle2Score(TskiAngles2)
 
                 if speed is not None:
-                    lateral_movement_score = scoring.getLateralMovementScore(speed, 180, 0, 0, 40)
+                    lateral_movement_score = scoring.getLateralMovementScore(
+                        speed,
+                        max_score=180,
+                        min_score=0,
+                        min_speed=0,
+                        max_speed=45,
+                        low_speed_threshold=30,
+                        low_speed_lambda=2.0,
+                    )
                 else:
                     lateral_movement_score = 0
 
@@ -760,6 +845,8 @@ def analyze_video(
                 if skiAngle is not None:
                     edging_angle_score.append(blue_score_skiAngle)
                 if speed is not None:
+                    # Rotation and Edging smooth this history over the latest
+                    # five valid lateral-speed measurements.
                     lateral_score.append(blue_score_lateralMovement)
                 if bendAngle is not None:
                     bending_angle_score.append(blue_score_bendAngle)
@@ -786,6 +873,39 @@ def analyze_video(
                 metrices["rotation_angle"].append(rotationSeparationAngle)
                 metrices["rotation_upper_angle"].append(rotationUpperAngle)
                 metrices["rotation_lower_angle"].append(rotationLowerAngle)
+                metrices["balance_offset"].append(
+                    balance_measurement.normalized_offset
+                    if balance_measurement else None
+                )
+                metrices["balance_angle"].append(
+                    balance_measurement.offset_angle
+                    if balance_measurement else None
+                )
+                metrices["balance_lateral_spread"].append(
+                    balance_measurement.spread_value
+                    if balance_measurement else None
+                )
+                metrices["balance_spread_score"].append(
+                    balance_measurement.spread_score
+                    if balance_measurement else None
+                )
+                # Compatibility aliases retained for existing report payloads.
+                metrices["balance_movement_range"].append(
+                    balance_measurement.range_value
+                    if balance_measurement else None
+                )
+                metrices["balance_range_score"].append(
+                    balance_measurement.range_score
+                    if balance_measurement else None
+                )
+                metrices["balance_smoothness_score"].append(
+                    balance_measurement.smoothness_score
+                    if balance_measurement else None
+                )
+                metrices["balance_rhythm_score"].append(
+                    balance_measurement.rhythm_score
+                    if balance_measurement else None
+                )
                 metrices["hip_angle"].append(hipAngle)
                 metrices["hip_vert_angle"].append(hipVertAngle)
                 metrices["speed/lateral movement"].append(speed)
@@ -797,6 +917,7 @@ def analyze_video(
                     turns, duration, TskiAngles2, edging_angle_score, lateral_score, bending_angle_score,
                     knee_angle_score, skiAngle2_score, pressure_angle_score, pressure_speed_score,
                     pressureRelativeHeights, pressureKneeAngles,
+                    balance_measurement.score if balance_measurement else None,
                     rotation_separation_score, hip_shoulder,
                     scoring, target_fps, count_tilt,
                     score_details=frame_score_details,
@@ -813,7 +934,7 @@ def analyze_video(
                         pillar_score_history[pillar].append(float(score))
 
                 running_pillar_scores = {
-                    pillar: sum(scores) / len(scores)
+                    pillar: (sum(scores) / len(scores)) if scores else 60.0
                     for pillar, scores in pillar_score_history.items()
                 }
                 Blue_pressure_final = running_pillar_scores["pressure"]
@@ -860,9 +981,54 @@ def analyze_video(
                     else "recent fallback" if isinstance(edgeAngle, (int, float))
                     else "unavailable"
                 )
+                recent_lateral_speeds = [
+                    value
+                    for value in metrices["speed/lateral movement"]
+                    if isinstance(value, (int, float)) and np.isfinite(value)
+                ][-5:]
                 lateral_movement_text = (
-                    f"{speed:.1f} px/frame"
-                    if isinstance(speed, (int, float))
+                    f"{sum(recent_lateral_speeds) / len(recent_lateral_speeds):.1f} px/frame"
+                    if recent_lateral_speeds else "N/A"
+                )
+                recent_lateral_speed = (
+                    sum(recent_lateral_speeds) / len(recent_lateral_speeds)
+                    if recent_lateral_speeds else None
+                )
+                balance_frame_score_text = (
+                    f"{frame_balance_score:.1f}/240"
+                    if isinstance(frame_balance_score, (int, float))
+                    else "collecting movement samples"
+                )
+                balance_offset_text = (
+                    f"{balance_measurement.normalized_offset * 100:+.2f}% body height"
+                    if balance_measurement else "N/A"
+                )
+                balance_angle_text = (
+                    f"{balance_measurement.offset_angle:.1f} deg"
+                    if balance_measurement else "N/A"
+                )
+                balance_spread_text = (
+                    f"{balance_measurement.spread_value * 100:.2f}% body height"
+                    if balance_measurement
+                    and isinstance(balance_measurement.spread_value, (int, float))
+                    else "N/A"
+                )
+                balance_spread_score_text = (
+                    f"{balance_measurement.spread_score:.1f}/240"
+                    if balance_measurement
+                    and isinstance(balance_measurement.spread_score, (int, float))
+                    else "N/A"
+                )
+                balance_smoothness_score_text = (
+                    f"{balance_measurement.smoothness_score:.1f}/240"
+                    if balance_measurement
+                    and isinstance(balance_measurement.smoothness_score, (int, float))
+                    else "N/A"
+                )
+                balance_rhythm_score_text = (
+                    f"{balance_measurement.rhythm_score:.1f}/240"
+                    if balance_measurement
+                    and isinstance(balance_measurement.rhythm_score, (int, float))
                     else "N/A"
                 )
                 edging_parallelism_component = frame_score_details[
@@ -888,15 +1054,25 @@ def analyze_video(
                     "  Knee range score           : "
                     f"{frame_score_details['pressure_knee_range_score']:.1f}/240 (25%)",
                     "-" * 72,
+                    "BALANCE",
+                    f"  Current frame score        : {balance_frame_score_text}",
+                    f"  Running average (displayed): {Blue_balance_final:.1f}/240",
+                    f"  CoM lateral offset         : {balance_offset_text}",
+                    f"  CoM plumb angle            : {balance_angle_text}",
+                    f"  Lateral spread (std dev)   : {balance_spread_text}",
+                    f"  Spread quality             : {balance_spread_score_text} (35%)",
+                    f"  Smoothness quality         : {balance_smoothness_score_text} (40%)",
+                    f"  Rhythm/symmetry quality    : {balance_rhythm_score_text} (25%)",
+                    "-" * 72,
                     "ROTATION",
                     f"  Current frame score        : {frame_rotation_score:.1f}/240",
                     f"  Running average (displayed): {Blue_rotation_final:.1f}/240",
                     f"  Body separation degree    : {rotation_degree_text}",
-                    f"  Body separation score     : {separation_score_text} (70%)",
+                    f"  Body separation score     : {separation_score_text} (60%)",
                     "  Direction-change score     : "
                     f"{frame_score_details['rotation_direction_change_score']:.1f}/240 (10%)",
-                    "  Lateral-movement score     : "
-                    f"{frame_score_details['rotation_lateral_score']:.1f}/240 (20%)",
+                    "  Lateral score (recent 5)   : "
+                    f"{frame_score_details['rotation_lateral_score']:.1f}/240 (30%)",
                     "-" * 72,
                     "EDGING",
                     f"  Current frame score        : {frame_edging_score:.1f}/240",
@@ -907,33 +1083,26 @@ def analyze_video(
                     f"{0.70 * edging_parallelism_component:.1f}",
                     f"  Edge angle ({edge_angle_source}) : {edge_angle_text}",
                     "  Edge-angle scoring         : ignored (display only)",
-                    f"  Lateral movement           : {lateral_movement_text}",
-                    "  Lateral component          : "
+                    f"  Lateral movement (recent 5): {lateral_movement_text}",
+                    "  Lateral component (recent 5): "
                     f"{edging_lateral_component:.1f}/240 x 30% = "
                     f"{0.30 * edging_lateral_component:.1f}",
                 ]))
 
-                score_timeline.append({
-                    "time_seconds": round(processed_frames / output_fps, 2),
-                    "pressure": frame_pressure_score,
-                    "balance": frame_balance_score,
-                    "rotation": frame_rotation_score,
-                    "edging": frame_edging_score,
-                    "ski_parallel_control": skiAngle,
-                    "edge_control": edgeAngle,
-                    "rotation_separation": rotationSeparationAngle,
-                    "pressure_relative_height": pressureRelativeHeight,
-                    "pressure_vertical_range": scoring.getPressureVerticalRange(
-                        pressureRelativeHeights
-                    ),
-                    "pressure_knee_range": scoring.getPressureKneeAngleRange(
-                        pressureKneeAngles
-                    ),
-                    "upper_body_alignment": hipAngle,
-                    "athletic_stance_knee": kneeAngle,
-                    "athletic_stance_bend": bendAngle,
-                    "transition_control": speed,
-                })
+                score_timeline.append(build_timeline_sample(
+                    time_seconds=round(processed_frames / output_fps, 2),
+                    pillar_scores=frame_pillar_scores,
+                    score_details=frame_score_details,
+                    pressure_knee_angle=pressureKneeAngle,
+                    balance_measurement=balance_measurement,
+                    rotation_separation_angle=rotationSeparationAngle,
+                    ski_direction_angle=skiAngle2,
+                    ski_parallelism_angle=skiAngle,
+                    lateral_speed=recent_lateral_speed,
+                    upper_body_alignment=hipAngle,
+                    athletic_stance_knee=kneeAngle,
+                    athletic_stance_bend=bendAngle,
+                ))
 
                 if processed_frames % 100 == 0:
                     logger.debug(f"Current scores - Edging: {Blue_edging_final:.1f}, "
@@ -1106,8 +1275,11 @@ def analyze_video(
         Blue_pressure_final = sum(pillar_score_history["pressure"]) / len(
             pillar_score_history["pressure"]
         )
-        Blue_balance_final = sum(pillar_score_history["balance"]) / len(
-            pillar_score_history["balance"]
+        Blue_balance_final = (
+            sum(pillar_score_history["balance"])
+            / len(pillar_score_history["balance"])
+            if pillar_score_history["balance"]
+            else 60.0
         )
         Blue_rotation_final = sum(pillar_score_history["rotation"]) / len(
             pillar_score_history["rotation"]
@@ -1151,6 +1323,10 @@ def analyze_video(
             "user_name": user_name,
             "attempt_number": attempt_number,
             "session_date": session_date,
+            "analysis_timeline": create_timeline_payload(
+                score_timeline,
+                sample_rate_hz=output_fps,
+            ),
         }
         if 'snapshot_path' in locals() and snapshot_saved and os.path.exists(snapshot_path):
             result["snapshot_path"] = snapshot_path

@@ -8,9 +8,17 @@ from datetime import date
 import uuid
 
 # Local imports
-from database import Base, engine, ensure_database_schema, get_db, SessionLocal
+from database import (
+    Base,
+    SessionLocal,
+    close_session_quietly,
+    engine,
+    ensure_database_schema,
+    get_db,
+)
 from models.person import Person
 from models.video_analysis import VideoAnalysis
+from models.analysis_timeline import AnalysisTimeline
 from schemas.person import PersonIDName
 import crud.person as person_crud
 import crud.video_analysis as video_crud
@@ -202,7 +210,7 @@ async def analyze_ski_video_premium_overlay(
         user_name = db_user.name
         attempt_number = video_crud.get_next_attempt_number(read_db, user_id)
     finally:
-        read_db.close()
+        close_session_quietly(read_db)
 
     # Generate unique job ID
     job_id = str(uuid.uuid4())
@@ -227,7 +235,7 @@ async def analyze_ski_video_premium_overlay(
             generate_report=report
         )
     finally:
-        write_db.close()
+        close_session_quietly(write_db)
     
     # Add background task
     background_tasks.add_task(

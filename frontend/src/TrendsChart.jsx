@@ -23,7 +23,7 @@ ChartJS.register(
   Filler
 );
 
-export default function TrendsChart({ api, token }) {
+export default function TrendsChart({ api, token, refreshKey }) {
   const [trends, setTrends] = useState(null);
   const [selectedMetric, setSelectedMetric] = useState('blue_iq');
   const [error, setError] = useState('');
@@ -39,7 +39,7 @@ export default function TrendsChart({ api, token }) {
         }
       })
       .catch((err) => setError(err.message));
-  }, [token]);
+  }, [api, token, refreshKey]);
 
   if (error) {
     return (

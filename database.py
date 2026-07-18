@@ -4,9 +4,11 @@ from sqlalchemy.orm import sessionmaker
 import os
 from dotenv import load_dotenv
 from sqlalchemy.pool import QueuePool
+import logging
 
 
 load_dotenv()
+logger = logging.getLogger(__name__)
 SQLALCHEMY_DATABASE_URL = (
     os.getenv("DATABASE_URL")
     or os.getenv("NEON_DATABASE_URL")
@@ -36,6 +38,21 @@ engine = create_engine(
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
+
+
+def close_session_quietly(db):
+    """Release a session without surfacing disconnects during teardown."""
+    try:
+        db.close()
+    except Exception as exc:
+        # Neon can close an idle SSL socket while a request is still alive.
+        # The request work is already complete at this point, so discard the
+        # dead connection instead of replacing a successful response with 500.
+        logger.warning("Discarding disconnected database session: %s", exc)
+        try:
+            db.invalidate()
+        except Exception:
+            pass
 
 
 def ensure_database_schema():
@@ -77,4 +94,4 @@ def get_db():
     try:
         yield db
     finally:
-        db.close()
+        close_session_quietly(db)

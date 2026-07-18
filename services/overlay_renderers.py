@@ -6,6 +6,8 @@ from datetime import date, datetime
 import cv2
 import numpy as np
 
+from services.metric_colors import METRIC_COLORS_RGB
+
 try:
     from PIL import Image, ImageDraw, ImageFont
 except ImportError:
@@ -77,7 +79,8 @@ def _score_fill_ratio(score):
 
 def _draw_metric_bar(canvas, label, score, x, y, width, colors, highlight=False):
     score = _clamp_score(score)
-    tier_label, tier_color = _score_tier(score)
+    tier_label, _ = _score_tier(score)
+    metric_color = tuple(reversed(METRIC_COLORS_RGB[label.lower()]))
     bar_x = x + 168
     bar_y = y + 16
     bar_w = width - 265
@@ -87,14 +90,14 @@ def _draw_metric_bar(canvas, label, score, x, y, width, colors, highlight=False)
     label_color = colors["accent"] if highlight else colors["text"]
     cv2.putText(canvas, label, (x, y + 31), cv2.FONT_HERSHEY_DUPLEX, 0.68, label_color, 2)
     cv2.rectangle(canvas, (bar_x, bar_y), (bar_x + bar_w, bar_y + bar_h), colors["bar_bg"], -1)
-    cv2.rectangle(canvas, (bar_x, bar_y), (bar_x + fill_w, bar_y + bar_h), tier_color, -1)
+    cv2.rectangle(canvas, (bar_x, bar_y), (bar_x + fill_w, bar_y + bar_h), metric_color, -1)
 
     for boundary in (100, 150, 200):
         marker_x = bar_x + int(bar_w * (boundary / MAX_BLUE_SCORE))
         cv2.line(canvas, (marker_x, bar_y), (marker_x, bar_y + bar_h), colors["panel"], 2)
 
     cv2.circle(canvas, (bar_x + fill_w, bar_y + bar_h // 2), 5, colors["panel"], -1)
-    cv2.circle(canvas, (bar_x + fill_w, bar_y + bar_h // 2), 5, tier_color, 2)
+    cv2.circle(canvas, (bar_x + fill_w, bar_y + bar_h // 2), 5, metric_color, 2)
     cv2.putText(canvas, f"{score:.0f}", (bar_x + bar_w + 18, y + 31), cv2.FONT_HERSHEY_DUPLEX, 0.68, label_color, 2)
     cv2.putText(canvas, tier_label.upper(), (bar_x, y + 56), cv2.FONT_HERSHEY_SIMPLEX, 0.44, colors["text"], 2)
 
@@ -667,8 +670,8 @@ def _draw_video_session_label_pillow(draw, athlete_name, attempt_number=None, se
 
 def _premium_metric_bar(draw, label, score, x, y, width, colors, fonts):
     score = _clamp_score(score)
-    tier_label, tier_color_bgr = _score_tier(score)
-    tier_color = _rgb(tier_color_bgr)
+    tier_label, _ = _score_tier(score)
+    metric_color = METRIC_COLORS_RGB[label.lower()]
     bar_x = x + 165
     bar_y = y + 21
     bar_w = width - 250
@@ -677,12 +680,12 @@ def _premium_metric_bar(draw, label, score, x, y, width, colors, fonts):
 
     draw.text((x, y + 11), label, fill=colors["text"], font=fonts["metric"])
     draw.rounded_rectangle((bar_x, bar_y, bar_x + bar_w, bar_y + bar_h), radius=8, fill=colors["bar_bg"])
-    draw.rounded_rectangle((bar_x, bar_y, bar_x + fill_w, bar_y + bar_h), radius=8, fill=tier_color)
+    draw.rounded_rectangle((bar_x, bar_y, bar_x + fill_w, bar_y + bar_h), radius=8, fill=metric_color)
     for boundary in (100, 150, 200):
         marker_x = bar_x + int(bar_w * ((boundary - 60) / 180))
         draw.line((marker_x, bar_y, marker_x, bar_y + bar_h), fill=colors["panel"], width=2)
 
-    draw.ellipse((bar_x + fill_w - 5, bar_y + 2, bar_x + fill_w + 5, bar_y + 12), fill=colors["panel"], outline=tier_color, width=2)
+    draw.ellipse((bar_x + fill_w - 5, bar_y + 2, bar_x + fill_w + 5, bar_y + 12), fill=colors["panel"], outline=metric_color, width=2)
     draw.text((bar_x + bar_w + 16, y + 8), f"{score:.0f}", fill=colors["text"], font=fonts["metric"])
     draw.text((bar_x, y + 42), tier_label.upper(), fill=colors["muted_dark"], font=fonts["tiny"])
 
@@ -740,6 +743,7 @@ def create_premium_overlay(
         "track":       (43,  53,  74),
         "blue":        (106, 175, 255),
         "green":       (34,  197,  94),
+        "orange":      (249, 115,  22),
         "amber":       (245, 158,  11),
         "red":         (239,  68,  68),
     }
@@ -960,9 +964,13 @@ def create_premium_overlay(
         ("Rotation", metrics["Blue_rotation_final"]),
         ("Edging",   metrics["Blue_edging_final"]),
     ]
+    metric_colors = {
+        label.title(): color
+        for label, color in METRIC_COLORS_RGB.items()
+    }
 
     def draw_metric_card(cy, label, score):
-        col = _tcolor(score)
+        col = metric_colors[label]
         # Card background + border
         draw.rounded_rectangle((panel_x, cy, panel_x+panel_w, cy+CARD_H),
                                 radius=12, fill=C["card"], outline=C["border"], width=1)
@@ -1020,10 +1028,10 @@ def create_premium_overlay(
     if display_mode == "coach":
         # Coach: 2×2 live metric grid
         live_items = [
-            ("Ski Separation", f"{_latest_metric_value(metrics,'ski_angle')}\u00b0"),
-            ("Edging",         f"{_latest_metric_value(metrics,'edge_angle')}\u00b0"),
-            ("Rotation",       f"{_latest_metric_value(metrics,'rotation_angle')}\u00b0"),
+            ("Edging",         f"{_latest_metric_value(metrics,'ski_angle')}\u00b0"),
             ("Pressure",       f"{_latest_metric_value(metrics,'pressure_angle')}\u00b0"),
+            ("Rotation",       f"{_latest_metric_value(metrics,'rotation_angle')}\u00b0"),
+            ("Balance",        f"{_latest_metric_value(metrics,'balance_angle')}\u00b0"),
         ]
         LCOL_W  = (panel_w - 8) // 2
         LCARD_H = STAT_H
@@ -1038,7 +1046,7 @@ def create_premium_overlay(
             draw.rounded_rectangle((lx, ly, lx+LCOL_W, ly+LCARD_H),
                                     radius=10, fill=C["card_soft"], outline=(38,50,72), width=1)
             draw.text((lx+12, ly+8),  lbl, fill=C["faint"], font=F["stat_label"])
-            draw.text((lx+12, ly+26), val, fill=C["blue"],  font=F["stat_value"])
+            draw.text((lx+12, ly+26), val, fill=metric_colors[lbl], font=F["stat_value"])
     else:
         # Athlete mode: two full-width stat rows (label left | value right, inline)
         turns_val = _latest_metric_value(metrics, "turns", precision=0)
@@ -1185,7 +1193,7 @@ def create_overlay(frame, metrics, frame_number, TARGET_WIDTH, logo_path=None, d
 
         live_metrics = [
             ("Rotation", f"{_latest_metric_value(metrics, 'rotation_angle')} deg"),
-            ("Edging", f"{_latest_metric_value(metrics, 'edge_angle')} deg"),
+            ("Edging", f"{_latest_metric_value(metrics, 'ski_angle')} deg"),
             ("Pressure", f"{_latest_metric_value(metrics, 'pressure_angle')} deg"),
         ]
         metric_y = 638

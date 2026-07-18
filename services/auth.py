@@ -9,9 +9,7 @@ from typing import Any, Dict
 
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
-from sqlalchemy.orm import Session
-
-from database import get_db
+from database import SessionLocal, close_session_quietly
 from models.person import Person
 
 
@@ -89,21 +87,33 @@ def decode_access_token(token: str) -> Dict[str, Any]:
         )
 
 
-def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)) -> Person:
+def get_current_user(token: str = Depends(oauth2_scheme)) -> Person:
+    """Authenticate with a short-lived session that ends before route work."""
     payload = decode_access_token(token)
     try:
         user_id = int(payload.get("sub"))
     except Exception:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid authentication token")
 
-    user = db.query(Person).filter(Person.id == user_id).first()
-    if not user or not user.is_active:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User account is inactive or missing")
-    return user
+    db = SessionLocal()
+    try:
+        user = db.query(Person).filter(Person.id == user_id).first()
+        if not user or not user.is_active:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="User account is inactive or missing",
+            )
+
+        # Routes only need loaded account fields such as id, name, and role.
+        # Detaching prevents any accidental lazy DB work after this session is
+        # released and, importantly, before a long background task begins.
+        db.expunge(user)
+        return user
+    finally:
+        close_session_quietly(db)
 
 
 def require_admin(current_user: Person = Depends(get_current_user)) -> Person:
     if current_user.role != "admin":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin access required")
     return current_user
-

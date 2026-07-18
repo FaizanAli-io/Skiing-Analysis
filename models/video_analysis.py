@@ -33,3 +33,10 @@ class VideoAnalysis(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     person = relationship("Person", back_populates="videos")
+    timeline = relationship(
+        "AnalysisTimeline",
+        back_populates="analysis",
+        uselist=False,
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
