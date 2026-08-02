@@ -4,6 +4,13 @@ import RunAnalysisGraph from "./RunAnalysisGraph";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
 const DASHBOARD_REFRESH_MS = 5000;
+const SCORE_METRICS = [
+  ["blue_iq", "Blue IQ"],
+  ["pressure", "Pressure"],
+  ["balance", "Balance"],
+  ["rotation", "Rotation"],
+  ["edging", "Edging"],
+];
 
 function useAutoRefresh(refresh, enabled = true) {
   const refreshRef = useRef(refresh);
@@ -124,6 +131,37 @@ function scoreBand(score) {
   return ["Emerging", "emerging"];
 }
 
+function formatDate(value) {
+  if (!value || value === "Unknown date") return "Date unavailable";
+  const parsed = new Date(`${String(value).slice(0, 10)}T00:00:00`);
+  if (Number.isNaN(parsed.getTime())) return String(value);
+  return parsed.toLocaleDateString(undefined, {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+  });
+}
+
+function recordContext(record) {
+  if (!record) return "No completed result yet";
+  const parts = [formatDate(record.date)];
+  if (record.session_number) parts.push(`Session ${record.session_number}`);
+  if (record.run_number) parts.push(`Run ${record.run_number}`);
+  return parts.join(" / ");
+}
+
+function comparisonLabel(comparison) {
+  if (!comparison) return "";
+  if (comparison.status === "baseline") return "Baseline established";
+  if (comparison.status === "matches_personal_best") return "Matches personal best";
+  if (comparison.status === "new_personal_best") {
+    const previousScore = comparison.previous_best?.score;
+    const gain = previousScore == null ? 0 : comparison.current_score - previousScore;
+    return gain > 0 ? `New personal best +${gain}` : "New personal best";
+  }
+  return `PB ${comparison.personal_best_score} / ${comparison.points_below} points below`;
+}
+
 function AuthShell({ children, mode }) {
   return (
     <main className="auth-page">
@@ -229,26 +267,121 @@ function ScorePill({ score }) {
   return <span className={`score-pill ${key}`}>{label}</span>;
 }
 
+function PersonalBestPanel({ records, title = "Personal bests", description }) {
+  return (
+    <section className="section-block personal-bests-panel">
+      <div className="section-heading">
+        <div>
+          <p className="eyebrow">All-time records</p>
+          <h2>{title}</h2>
+          <p>{description || "Your highest completed result for Blue IQ and each pillar."}</p>
+        </div>
+      </div>
+      <div className="personal-best-grid">
+        {SCORE_METRICS.map(([key, label]) => {
+          const record = records?.[key];
+          return (
+            <article className={`personal-best-item ${key === "blue_iq" ? "primary" : ""}`} key={key}>
+              <span>{label}</span>
+              <strong>{record?.score ?? "--"}<small>/240</small></strong>
+              <p>{recordContext(record)}</p>
+            </article>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
+function LeaderboardPanel({ leaderboards }) {
+  const [metric, setMetric] = useState("blue_iq");
+  const rows = leaderboards?.[metric] || [];
+  const metricLabel = SCORE_METRICS.find(([key]) => key === metric)?.[1] || metric;
+
+  return (
+    <section className="section-block leaderboard-panel">
+      <div className="section-heading">
+        <div>
+          <p className="eyebrow">Admin only</p>
+          <h2>Personal-best leaderboards</h2>
+          <p>Each athlete appears once, using their highest completed result.</p>
+        </div>
+        <div className="metric-tabs" role="tablist" aria-label="Leaderboard metric">
+          {SCORE_METRICS.map(([key, label]) => (
+            <button
+              type="button"
+              role="tab"
+              aria-selected={metric === key}
+              className={metric === key ? "active" : ""}
+              key={key}
+              onClick={() => setMetric(key)}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      </div>
+      <div className="leaderboard-table" role="table" aria-label={`${metricLabel} leaderboard`}>
+        <div className="leaderboard-row leaderboard-head" role="row">
+          <span>Rank</span>
+          <span>Athlete</span>
+          <span>Best context</span>
+          <span>Score</span>
+        </div>
+        {rows.map((row) => (
+          <div className="leaderboard-row" role="row" key={`${metric}-${row.person_id}`}>
+            <strong className="leaderboard-rank">{row.rank}</strong>
+            <div className="leaderboard-athlete">
+              <strong>{row.athlete_name}</strong>
+              <small>{row.athlete_email}</small>
+            </div>
+            <span>{recordContext(row)}</span>
+            <strong className="leaderboard-score">{row.score}<small>/240</small></strong>
+          </div>
+        ))}
+        {!rows.length && <div className="empty-state">No completed results for {metricLabel} yet.</div>}
+      </div>
+    </section>
+  );
+}
+
 function AttemptCard({ attempt, onViewAnalysis }) {
   const blueIq = Math.ceil(
     Number(attempt.blue_iq_score || (Number(attempt.pressure_score || 0) + Number(attempt.balance_score || 0) + Number(attempt.rotation_score || 0) + Number(attempt.edging_score || 0)) / 4)
   );
   const video = fileUrl(attempt.video_link || attempt.output_video_path);
   const report = fileUrl(attempt.report_path);
+  const comparisons = attempt.personal_best_comparisons || {};
+  const newPersonalBests = new Set(attempt.new_personal_bests || []);
+  const runNumber = attempt.run_number || attempt.attempt_number || attempt.id;
+  const sessionLabel = attempt.session_number ? `Session ${attempt.session_number}` : "Session";
+  const dateLabel = formatDate(attempt.session_date || attempt.created_at || attempt.timestamp);
   return (
     <article className="attempt-card">
       <div className="attempt-top">
         <div>
-          <p className="eyebrow">Run {attempt.attempt_number || attempt.id}</p>
+          <p className="eyebrow">{sessionLabel} / Run {runNumber}</p>
           <h3>Blue IQ {blueIq}<span>/240</span></h3>
+          <p className="attempt-date">{dateLabel}</p>
         </div>
-        <ScorePill score={blueIq} />
+        <div className="attempt-badges">
+          {newPersonalBests.has("blue_iq") && <span className="new-pb-badge">New personal best</span>}
+          <ScorePill score={blueIq} />
+        </div>
       </div>
+      {comparisons.blue_iq && <p className="blue-iq-comparison">{comparisonLabel(comparisons.blue_iq)}</p>}
       <div className="metric-grid">
-        <span>Pressure <b>{Math.ceil(attempt.pressure_score || 0)}</b></span>
-        <span>Balance <b>{Math.ceil(attempt.balance_score || 0)}</b></span>
-        <span>Rotation <b>{Math.ceil(attempt.rotation_score || 0)}</b></span>
-        <span>Edging <b>{Math.ceil(attempt.edging_score || 0)}</b></span>
+        {SCORE_METRICS.slice(1).map(([key, label]) => (
+          <div className="metric-row" key={key}>
+            <div>
+              <span>{label}</span>
+              <small className={newPersonalBests.has(key) ? "new-record-copy" : ""}>
+                {newPersonalBests.has(key) ? "New personal best" : comparisonLabel(comparisons[key])}
+              </small>
+            </div>
+            <b>{Math.ceil(attempt[`${key}_score`] || 0)}<small>/240</small></b>
+          </div>
+        ))}
       </div>
       <div className="card-actions">
         {onViewAnalysis && (
@@ -266,11 +399,16 @@ function ClientDashboard() {
   const [attempts, setAttempts] = useState([]);
   const [displayCount, setDisplayCount] = useState(4); // Show 4 initially
   const [user, setUser] = useState(null);
+  const [personalBests, setPersonalBests] = useState({});
   const [error, setError] = useState("");
 
-  async function loadAttempts() {
-    const history = await api("/me/attempts", { token });
+  async function loadHistory() {
+    const [history, bests] = await Promise.all([
+      api("/me/attempts", { token }),
+      api("/me/personal-bests", { token }),
+    ]);
     setAttempts(history);
+    setPersonalBests(bests.personal_bests || {});
   }
 
   useEffect(() => {
@@ -281,15 +419,17 @@ function ClientDashboard() {
     Promise.all([
       api("/auth/me", { token }),
       api("/me/attempts", { token }),
+      api("/me/personal-bests", { token }),
     ])
-      .then(([profile, history]) => {
+      .then(([profile, history, bests]) => {
         setUser(profile);
         setAttempts(history);
+        setPersonalBests(bests.personal_bests || {});
       })
       .catch((err) => setError(err.message));
   }, [token]);
 
-  useAutoRefresh(loadAttempts, Boolean(token));
+  useAutoRefresh(loadHistory, Boolean(token));
 
   const latest = attempts[0];
   const displayedAttempts = attempts.slice(0, displayCount);
@@ -317,6 +457,7 @@ function ClientDashboard() {
           <strong>{latest ? Math.ceil(latest.blue_iq_score || 0) : "--"}</strong>
         </div>
       </section>
+      <PersonalBestPanel records={personalBests} />
       {attempts.length >= 2 && (
         <TrendsChart
           api={api}
@@ -348,6 +489,7 @@ function AdminDashboard() {
   const token = getToken("admin");
   const [users, setUsers] = useState([]);
   const [attempts, setAttempts] = useState([]);
+  const [leaderboards, setLeaderboards] = useState({});
   const [displayCount, setDisplayCount] = useState(4); // Show 4 initially
   const [selectedClient, setSelectedClient] = useState(""); // Track selected client filter
   const [error, setError] = useState("");
@@ -355,17 +497,23 @@ function AdminDashboard() {
   const [graphAttempt, setGraphAttempt] = useState(null);
 
   async function loadData() {
-    const [userRows, attemptRows] = await Promise.all([
+    const [userRows, attemptRows, leaderboardRows] = await Promise.all([
       api("/admin/users", { token }),
       api("/admin/attempts", { token }),
+      api("/admin/leaderboards?limit=50", { token }),
     ]);
     setUsers(userRows);
     setAttempts(attemptRows);
+    setLeaderboards(leaderboardRows.leaderboards || {});
   }
 
-  async function loadAttempts() {
-    const attemptRows = await api("/admin/attempts", { token });
+  async function loadActivity() {
+    const [attemptRows, leaderboardRows] = await Promise.all([
+      api("/admin/attempts", { token }),
+      api("/admin/leaderboards?limit=50", { token }),
+    ]);
     setAttempts(attemptRows);
+    setLeaderboards(leaderboardRows.leaderboards || {});
   }
 
   useEffect(() => {
@@ -376,7 +524,7 @@ function AdminDashboard() {
     loadData().catch((err) => setError(err.message));
   }, [token]);
 
-  useAutoRefresh(loadAttempts, Boolean(token));
+  useAutoRefresh(loadActivity, Boolean(token));
 
   async function pollJobStatus(jobId) {
     const maxAttempts = 120; // Poll for up to 10 minutes (120 * 5 seconds)
@@ -511,6 +659,7 @@ function AdminDashboard() {
           </div>
         </section>
       </section>
+      <LeaderboardPanel leaderboards={leaderboards} />
       <section className="section-block">
         <div className="section-heading">
           <div>

@@ -65,6 +65,171 @@ logging.getLogger('ultralytics').setLevel(logging.WARNING)
 from services.new_utils import *
 from services.balance_metrics import BalanceTracker
 
+
+ORIENTATION_ANGLES = (0, 90, 180, -90)
+ORIENTATION_SAMPLE_RATIOS = (0.10, 0.30, 0.50, 0.70, 0.90)
+
+
+def _disable_capture_auto_rotation(capture) -> None:
+    """Keep OpenCV from rotating one capture differently from another."""
+    orientation_property = getattr(cv2, "CAP_PROP_ORIENTATION_AUTO", None)
+    if orientation_property is None:
+        return
+    try:
+        capture.set(orientation_property, 0)
+    except (cv2.error, TypeError, ValueError):
+        pass
+
+
+def _normalize_right_angle(value: Any) -> int:
+    """Normalize rotation metadata to one of the supported frame rotations."""
+    try:
+        normalized = int(round(float(value) / 90.0) * 90) % 360
+    except (TypeError, ValueError):
+        return 0
+    return -90 if normalized == 270 else normalized
+
+
+def _capture_rotation_metadata(capture) -> int:
+    orientation_property = getattr(cv2, "CAP_PROP_ORIENTATION_META", None)
+    if orientation_property is None:
+        return 0
+    try:
+        return _normalize_right_angle(capture.get(orientation_property))
+    except (cv2.error, TypeError, ValueError):
+        return 0
+
+
+def _average_visible_landmarks(
+    landmarks,
+    indexes: Tuple[int, ...],
+    minimum_visibility: float = 0.15,
+) -> Optional[Tuple[float, float, float]]:
+    points = []
+    for index in indexes:
+        landmark = landmarks[index]
+        visibility = float(getattr(landmark, "visibility", 1.0))
+        x_value = float(landmark.x)
+        y_value = float(landmark.y)
+        if (
+            visibility >= minimum_visibility
+            and np.isfinite(x_value)
+            and np.isfinite(y_value)
+            and -0.15 <= x_value <= 1.15
+            and -0.15 <= y_value <= 1.15
+        ):
+            points.append((x_value, y_value, visibility))
+
+    if not points:
+        return None
+
+    return (
+        float(np.mean([point[0] for point in points])),
+        float(np.mean([point[1] for point in points])),
+        float(np.mean([point[2] for point in points])),
+    )
+
+
+def _head_to_toe_orientation_score(landmarks) -> Optional[float]:
+    """Score an orientation by its positive, normalized head-to-toe Y gap."""
+    head = _average_visible_landmarks(landmarks, (0, 2, 5, 7, 8))
+    toes = _average_visible_landmarks(landmarks, (31, 32))
+    if toes is None:
+        toes = _average_visible_landmarks(landmarks, (27, 28))
+    if head is None or toes is None:
+        return None
+
+    vertical_gap = toes[1] - head[1]
+    if vertical_gap <= 0.08:
+        return None
+
+    # Coordinates are normalized by MediaPipe, so this is already independent
+    # of source resolution. Visibility only breaks very close candidate scores.
+    mean_visibility = (head[2] + toes[2]) / 2.0
+    return float(vertical_gap + 0.01 * mean_visibility)
+
+
+def _orientation_sample_frames(capture, total_frames: int) -> List[np.ndarray]:
+    if total_frames <= 0:
+        return []
+
+    frame_indexes = sorted({
+        min(total_frames - 1, max(0, int(round((total_frames - 1) * ratio))))
+        for ratio in ORIENTATION_SAMPLE_RATIOS
+    })
+    frames = []
+    for frame_index in frame_indexes:
+        capture.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
+        success, frame = capture.read()
+        if success and frame is not None and frame.size:
+            frames.append(frame)
+    return frames
+
+
+def _detect_upright_rotation(
+    capture,
+    total_frames: int,
+    mp_pose,
+    target_width: int,
+    target_height: int,
+) -> Tuple[int, float, Dict[int, Dict[str, float]]]:
+    """Choose the rotation with the largest valid head-to-toe vertical gap."""
+    metadata_rotation = _capture_rotation_metadata(capture)
+    sample_frames = _orientation_sample_frames(capture, total_frames)
+    candidate_scores: Dict[int, List[float]] = {
+        angle: [] for angle in ORIENTATION_ANGLES
+    }
+
+    orientation_pose = mp_pose.Pose(
+        static_image_mode=True,
+        model_complexity=1,
+        min_detection_confidence=0.40,
+    )
+    try:
+        for sample_frame in sample_frames:
+            for angle in ORIENTATION_ANGLES:
+                rotated_frame = rotate_frame(sample_frame, angle)
+                normalized_frame, _, _ = resize_and_center_frame(
+                    rotated_frame,
+                    target_width,
+                    target_height,
+                )
+                rgb_frame = cv2.cvtColor(normalized_frame, cv2.COLOR_BGR2RGB)
+                pose_results = orientation_pose.process(rgb_frame)
+                if not pose_results.pose_landmarks:
+                    continue
+
+                score = _head_to_toe_orientation_score(
+                    pose_results.pose_landmarks.landmark
+                )
+                if score is not None:
+                    candidate_scores[angle].append(score)
+    finally:
+        orientation_pose.close()
+
+    summaries: Dict[int, Dict[str, float]] = {}
+    sample_count = max(1, len(sample_frames))
+    for angle, scores in candidate_scores.items():
+        if not scores:
+            continue
+        coverage = len(scores) / sample_count
+        median_gap = float(np.median(scores))
+        summaries[angle] = {
+            "median_gap": median_gap,
+            "coverage": coverage,
+            "score": median_gap * (0.85 + 0.15 * coverage),
+        }
+
+    if not summaries:
+        return metadata_rotation, 0.0, summaries
+
+    selected_angle = max(
+        summaries,
+        key=lambda angle: summaries[angle]["score"],
+    )
+    return selected_angle, summaries[selected_angle]["score"], summaries
+
+
 metrices = {
     "hip_angle" : [],
     "hip_vert_angle" : [],
@@ -117,6 +282,8 @@ def analyze_video(
     user_name: Optional[str] = None,
     attempt_number: Optional[int] = None,
     session_date: Optional[str] = None,
+    session_number: Optional[int] = None,
+    previous_personal_bests: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Analyze ski video and return performance metrics"""
     _reset_frame_metrics_log()
@@ -158,6 +325,7 @@ def analyze_video(
         if not cap.isOpened():
             logger.error(f"Failed to open video file: {video_path}")
             raise ValueError("Error: Could not open video file.")
+        _disable_capture_auto_rotation(cap)
 
         target_fps = 10
         video_fps = int(cap.get(cv2.CAP_PROP_FPS))
@@ -304,64 +472,39 @@ def analyze_video(
         snapshot_frame_target = max(1, int((total_frames / frame_skip) * 0.5))
         last_report_frame = None
 
-        # Detect optimal rotation angle - person should be vertical/upright
-        logger.info("Detecting optimal rotation angle using nose-above-feet test...")
-        rotation_angles = [0, 90, -90, 180]
-        detected_angle = 0  # Default: no rotation needed
-        best_score = -999
-        
+        # Detect one stable orientation before any analysis. Candidate rotations
+        # are scored over several frames by their positive head-to-toe Y gap.
+        logger.info("Detecting upright video rotation from head-to-toe distance...")
+        detected_angle = 0
+        best_score = 0.0
+        orientation_summaries: Dict[int, Dict[str, float]] = {}
         try:
-            # Skip to middle of video for a cleaner frame
-            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-            middle_frame = total_frames // 2
-            cap.set(cv2.CAP_PROP_POS_FRAMES, middle_frame)
-            ret, test_frame = cap.read()
-            
-            if ret:
-                logger.info(f"Testing rotation on middle frame ({middle_frame}/{total_frames}) with shape: {test_frame.shape}")
-                
-                for angle in rotation_angles:
-                    # Test the SAME frame at different angles
-                    rotated_frame = rotate_frame(test_frame, angle)
-                    resized_frame, new_width, new_height = resize_and_center_frame(rotated_frame, TARGET_WIDTH, TARGET_HEIGHT)
-                    
-                    # Check if person is upright using pose detection
-                    rgb_frame = cv2.cvtColor(resized_frame, cv2.COLOR_BGR2RGB)
-                    pose_results = pose.process(rgb_frame)
-                    
-                    if pose_results.pose_landmarks:
-                        landmarks = pose_results.pose_landmarks.landmark
-                        
-                        # Simple and reliable: nose should be ABOVE feet (smaller y = higher up)
-                        nose_y = landmarks[0].y          # landmark 0 = nose
-                        l_ankle_y = landmarks[27].y      # landmark 27 = left ankle
-                        r_ankle_y = landmarks[28].y      # landmark 28 = right ankle
-                        feet_y = (l_ankle_y + r_ankle_y) / 2
-                        
-                        # CORRECT orientation: nose_y < feet_y (nose is HIGHER = smaller y value)
-                        # Score = how much ABOVE the feet the nose is
-                        score = feet_y - nose_y
-                        
-                        logger.info(f"Angle {angle:4d}Â°: nose_y={nose_y:.3f}, feet_y={feet_y:.3f}, score={score:.3f}")
-                        
-                        if score > best_score:
-                            best_score = score
-                            detected_angle = angle
-                            logger.info(f"  âœ“ Better orientation (nose is above feet)")
-                    else:
-                        logger.debug(f"Angle {angle}Â°: No pose landmarks detected")
-            else:
-                logger.warning("Could not read test frame, defaulting to 0Â° rotation")
-                
+            detected_angle, best_score, orientation_summaries = (
+                _detect_upright_rotation(
+                    cap,
+                    total_frames,
+                    mp_pose,
+                    TARGET_WIDTH,
+                    TARGET_HEIGHT,
+                )
+            )
         except Exception as e:
             logger.error(f"Error during rotation detection: {e}")
-            detected_angle = 0
-        
+
         # Close test capture and open fresh for main processing
         cap.release()
         cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            raise ValueError("Error: Could not reopen video file after orientation detection.")
+        _disable_capture_auto_rotation(cap)
         
-        logger.info(f"âœ“ Using rotation angle: {detected_angle}Â° (nose-above-feet score: {best_score:.3f})")
+        logger.info(
+            "Using rotation angle %s degrees "
+            "(head-to-toe score %.3f; candidates=%s)",
+            detected_angle,
+            best_score,
+            orientation_summaries,
+        )
         frame_count = 0
         processed_frames = 0
 
@@ -1320,9 +1463,11 @@ def analyze_video(
             "processed_frames": processed_frames,
             "display_mode": display_mode,
             "overlay_renderer": overlay_renderer,
+            "rotation_applied": detected_angle,
             "user_name": user_name,
             "attempt_number": attempt_number,
             "session_date": session_date,
+            "session_number": session_number,
             "analysis_timeline": create_timeline_payload(
                 score_timeline,
                 sample_rate_hz=output_fps,
@@ -1341,6 +1486,8 @@ def analyze_video(
                     "user_name": user_name,
                     "attempt_number": attempt_number,
                     "session_date": session_date,
+                    "session_number": session_number,
+                    "previous_personal_bests": previous_personal_bests or {},
                 },
             )
             result["report_text"] = report_result["report_text"]

@@ -10,8 +10,14 @@ from models.analysis_timeline import AnalysisTimeline
 from schemas.analysis_timeline import AnalysisTimelineOut
 from schemas.person import PersonOut
 from schemas.video_analysis import VideoAnalysisOut
+from schemas.personal_best import LeaderboardsResponse, PersonalBestsResponse
 from services.auth import require_admin
 from services.aws_s3 import S3Manager
+from services.personal_bests import (
+    build_leaderboards,
+    enrich_attempts,
+    personal_bests_for_person,
+)
 from services.analysis_timeline import (
     aggregate_timeline_samples,
     sanitize_parameter_config,
@@ -65,7 +71,8 @@ def admin_list_attempts(
                 attempt.video_link = S3Manager.get_video_url(attempt.s3_video_key, expiration=86400)
             if attempt.s3_report_key:
                 attempt.report_path = S3Manager.get_report_url(attempt.s3_report_key, expiration=86400)
-    
+
+    enrich_attempts(db, attempts)
     return attempts
 
 
@@ -97,8 +104,37 @@ def admin_user_attempts(
                 attempt.video_link = S3Manager.get_video_url(attempt.s3_video_key, expiration=86400)
             if attempt.s3_report_key:
                 attempt.report_path = S3Manager.get_report_url(attempt.s3_report_key, expiration=86400)
-    
+
+    enrich_attempts(db, attempts)
     return attempts
+
+
+@router.get(
+    "/users/{user_id}/personal-bests",
+    response_model=PersonalBestsResponse,
+)
+def admin_user_personal_bests(
+    user_id: int,
+    _admin: Person = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    user = db.query(Person).filter(Person.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    return {
+        "person_id": user_id,
+        "personal_bests": personal_bests_for_person(db, user_id),
+    }
+
+
+@router.get("/leaderboards", response_model=LeaderboardsResponse)
+def admin_leaderboards(
+    limit: int = 50,
+    _admin: Person = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    """Return one personal-best entry per athlete for every score metric."""
+    return {"leaderboards": build_leaderboards(db, limit=limit)}
 
 
 @router.get(

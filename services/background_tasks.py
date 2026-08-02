@@ -13,6 +13,7 @@ import crud.person as person_crud
 import crud.job as job_crud
 from models.video_analysis import VideoAnalysis
 from models.analysis_timeline import AnalysisTimeline
+from services.personal_bests import pre_run_personal_best_context
 
 
 logger = logging.getLogger(__name__)
@@ -97,10 +98,11 @@ def _prepare_job_context(
     user_id: int,
     user_name: Optional[str],
     attempt_number: Optional[int],
-) -> Tuple[str, int]:
+    session_date: str,
+) -> Tuple[str, int, Dict[str, Any]]:
     """Resolve athlete metadata, then release the DB before video processing."""
 
-    def operation(db: Any) -> Tuple[str, int]:
+    def operation(db: Any) -> Tuple[str, int, Dict[str, Any]]:
         job = job_crud.update_job_status(
             db,
             job_id,
@@ -122,7 +124,12 @@ def _prepare_job_context(
 
                 resolved_attempt = get_next_attempt_number(db, user_id)
 
-        return str(resolved_name), int(resolved_attempt)
+        personal_best_context = pre_run_personal_best_context(
+            db,
+            user_id,
+            session_date,
+        )
+        return str(resolved_name), int(resolved_attempt), personal_best_context
 
     return _run_db_operation(operation, f"Prepare job {job_id}")
 
@@ -279,13 +286,14 @@ def process_video_analysis_background(
     """Process one video without holding a DB session during long work."""
     try:
         logger.info("Starting background analysis for job %s", job_id)
-        user_name, attempt_number = _prepare_job_context(
+        session_date = date.today().isoformat()
+        user_name, attempt_number, personal_best_context = _prepare_job_context(
             job_id,
             user_id,
             user_name,
             attempt_number,
+            session_date,
         )
-        session_date = date.today().isoformat()
 
         update_job_progress(job_id, 10)
 
@@ -298,6 +306,8 @@ def process_video_analysis_background(
             user_name=user_name,
             attempt_number=attempt_number,
             session_date=session_date,
+            session_number=personal_best_context["session_number"],
+            previous_personal_bests=personal_best_context["personal_bests"],
         )
 
         update_job_progress(job_id, 60)

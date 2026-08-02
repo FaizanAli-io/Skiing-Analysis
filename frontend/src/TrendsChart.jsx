@@ -1,16 +1,16 @@
-import { useState, useEffect } from 'react';
-import { Line } from 'react-chartjs-2';
+import { useEffect, useMemo, useState } from "react";
+import { Line } from "react-chartjs-2";
 import {
-  Chart as ChartJS,
   CategoryScale,
+  Chart as ChartJS,
+  Filler,
+  Legend,
   LinearScale,
-  PointElement,
   LineElement,
+  PointElement,
   Title,
   Tooltip,
-  Legend,
-  Filler
-} from 'chart.js';
+} from "chart.js";
 
 ChartJS.register(
   CategoryScale,
@@ -20,234 +20,196 @@ ChartJS.register(
   Title,
   Tooltip,
   Legend,
-  Filler
+  Filler,
 );
+
+const METRICS = [
+  ["blue_iq", "Blue IQ"],
+  ["pressure", "Pressure"],
+  ["balance", "Balance"],
+  ["rotation", "Rotation"],
+  ["edging", "Edging"],
+];
+
+function comparisonText(comparison) {
+  if (!comparison) return "No comparison available";
+  if (comparison.status === "new_personal_best") {
+    const previous = comparison.previous_best?.score;
+    const gain = previous == null ? 0 : comparison.current_score - previous;
+    return gain > 0 ? `New personal best, ${gain} points higher` : "New personal best";
+  }
+  if (comparison.status === "baseline") return "First recorded result: baseline established";
+  if (comparison.status === "matches_personal_best") return "Matches your personal best";
+  return `${comparison.points_below} points below your personal best`;
+}
+
+function bestContext(record) {
+  if (!record) return "No completed result yet";
+  const parts = [];
+  if (record.date && record.date !== "Unknown date") parts.push(record.date);
+  if (record.session_number) parts.push(`Session ${record.session_number}`);
+  if (record.run_number) parts.push(`Run ${record.run_number}`);
+  return parts.join(" / ") || "Recorded result";
+}
 
 export default function TrendsChart({ api, token, refreshKey }) {
   const [trends, setTrends] = useState(null);
-  const [selectedMetric, setSelectedMetric] = useState('blue_iq');
-  const [error, setError] = useState('');
+  const [selectedMetric, setSelectedMetric] = useState("blue_iq");
+  const [error, setError] = useState("");
 
   useEffect(() => {
-    api('/me/trends?limit=15', { token })
+    let active = true;
+    api("/me/trends?limit=15", { token })
       .then((data) => {
+        if (!active) return;
         if (data.error) {
           setError(data.error);
-        } else {
-          setTrends(data);
-          setError('');
+          return;
         }
+        setTrends(data);
+        setError("");
       })
-      .catch((err) => setError(err.message));
+      .catch((err) => active && setError(err.message));
+    return () => {
+      active = false;
+    };
   }, [api, token, refreshKey]);
+
+  const chartData = useMemo(() => {
+    if (!trends) return null;
+    const metricLabel = METRICS.find(([key]) => key === selectedMetric)?.[1] || selectedMetric;
+    return {
+      labels: trends.time_series.runs.map((run) => `Run ${run}`),
+      datasets: [
+        {
+          label: metricLabel,
+          data: trends.time_series[selectedMetric],
+          borderColor: "#6aafff",
+          backgroundColor: "rgba(106, 175, 255, 0.08)",
+          borderWidth: 2,
+          tension: 0.28,
+          fill: true,
+          pointRadius: 4,
+          pointHoverRadius: 6,
+          pointBackgroundColor: "#6aafff",
+          pointBorderColor: "#07111f",
+          pointBorderWidth: 2,
+        },
+      ],
+    };
+  }, [selectedMetric, trends]);
 
   if (error) {
     return (
       <section className="section-block">
         <div className="section-heading">
-          <h2>Performance Trends</h2>
-          <p>Track your progress over time</p>
+          <div>
+            <p className="eyebrow">Run history</p>
+            <h2>Score history</h2>
+          </div>
         </div>
         <div className="empty-state">{error}</div>
       </section>
     );
   }
 
-  if (!trends) {
+  if (!trends || !chartData) {
     return (
       <section className="section-block">
         <div className="section-heading">
-          <h2>Performance Trends</h2>
-          <p>Loading...</p>
+          <div>
+            <p className="eyebrow">Run history</p>
+            <h2>Score history</h2>
+          </div>
         </div>
+        <div className="empty-state">Loading score history...</div>
       </section>
     );
   }
 
-  const metricLabels = {
-    blue_iq: 'Blue IQ',
-    balance: 'Balance',
-    rotation: 'Rotation',
-    pressure: 'Pressure',
-    edging: 'Edging'
-  };
-
-  const chartData = {
-    labels: trends.time_series.dates,
-    datasets: [
-      {
-        label: metricLabels[selectedMetric],
-        data: trends.time_series[selectedMetric],
-        borderColor: '#6aafff',
-        backgroundColor: 'rgba(106, 175, 255, 0.1)',
-        tension: 0.4,
-        fill: true,
-        pointRadius: 4,
-        pointHoverRadius: 6,
-        pointBackgroundColor: '#6aafff',
-        pointBorderColor: '#fff',
-        pointBorderWidth: 2
-      }
-    ]
-  };
+  const comparison = trends.current_vs_personal_best?.[selectedMetric];
+  const personalBest = trends.personal_bests?.[selectedMetric];
+  const currentScore = comparison?.current_score ?? trends.time_series[selectedMetric]?.at(-1) ?? "--";
+  const selectedLabel = METRICS.find(([key]) => key === selectedMetric)?.[1];
 
   const chartOptions = {
     responsive: true,
     maintainAspectRatio: false,
+    interaction: { mode: "index", intersect: false },
     plugins: {
-      legend: {
-        display: false
-      },
-      title: {
-        display: false
-      },
+      legend: { display: false },
+      title: { display: false },
       tooltip: {
-        backgroundColor: '#0a1728',
-        titleColor: '#eef6ff',
-        bodyColor: '#8fa3bd',
-        borderColor: 'rgba(106, 175, 255, 0.2)',
+        backgroundColor: "#07111f",
+        titleColor: "#eef6ff",
+        bodyColor: "#c8d7ea",
+        borderColor: "rgba(106, 175, 255, 0.28)",
         borderWidth: 1,
         padding: 12,
-        displayColors: false
-      }
+        displayColors: false,
+        callbacks: {
+          afterTitle: (items) => trends.time_series.dates[items[0]?.dataIndex] || "",
+          label: (item) => `${selectedLabel}: ${item.formattedValue} / 240`,
+        },
+      },
     },
     scales: {
       y: {
-        beginAtZero: true,
+        min: 60,
         max: 240,
-        grid: {
-          color: 'rgba(255, 255, 255, 0.08)'
-        },
-        ticks: {
-          color: '#8fa3bd',
-          font: {
-            size: 12
-          }
-        }
+        grid: { color: "rgba(255, 255, 255, 0.07)" },
+        ticks: { color: "#8fa3bd", stepSize: 30 },
       },
       x: {
-        grid: {
-          color: 'rgba(255, 255, 255, 0.08)'
-        },
-        ticks: {
-          color: '#8fa3bd',
-          font: {
-            size: 11
-          },
-          maxRotation: 45,
-          minRotation: 45
-        }
-      }
-    }
+        grid: { display: false },
+        ticks: { color: "#8fa3bd", maxRotation: 0, autoSkip: true },
+      },
+    },
   };
-
-  const getTrendEmoji = (trend) => {
-    if (trend === 'improving') return '↗️';
-    if (trend === 'declining') return '↘️';
-    return '→';
-  };
-
-  const getTrendClass = (trend) => {
-    if (trend === 'improving') return 'trend-up';
-    if (trend === 'declining') return 'trend-down';
-    return 'trend-stable';
-  };
-
-  const currentMetricData = trends.current_vs_first[selectedMetric];
 
   return (
-    <section className="section-block">
+    <section className="section-block trends-panel">
       <div className="section-heading">
         <div>
-          <h2>Performance Trends</h2>
-          <p>Your progress over the last {trends.total_runs} runs</p>
+          <p className="eyebrow">Run history</p>
+          <h2>Score history</h2>
+          <p>Compare completed runs against your all-time personal best.</p>
         </div>
-        <select
-          value={selectedMetric}
-          onChange={(e) => setSelectedMetric(e.target.value)}
-          style={{
-            padding: '8px 12px',
-            background: '#091426',
-            border: '1px solid var(--line-soft)',
-            borderRadius: '8px',
-            color: 'var(--text)',
-            fontSize: '14px'
-          }}
-        >
-          <option value="blue_iq">Blue IQ</option>
-          <option value="balance">Balance</option>
-          <option value="rotation">Rotation</option>
-          <option value="pressure">Pressure</option>
-          <option value="edging">Edging</option>
-        </select>
+        <div className="metric-tabs" role="tablist" aria-label="Score metric">
+          {METRICS.map(([key, label]) => (
+            <button
+              type="button"
+              role="tab"
+              aria-selected={selectedMetric === key}
+              className={selectedMetric === key ? "active" : ""}
+              key={key}
+              onClick={() => setSelectedMetric(key)}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
       </div>
 
-      {/* Chart */}
-      <div style={{ background: '#0a1728', padding: '24px', borderRadius: '16px', height: '400px' }}>
+      <div className="history-chart">
         <Line data={chartData} options={chartOptions} />
       </div>
 
-      {/* Stats Cards */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '16px', marginTop: '24px' }}>
-        <div style={{ background: '#0a1728', padding: '18px', borderRadius: '12px', border: '1px solid var(--line-soft)' }}>
-          <p className="eyebrow">Overall Trend</p>
-          <strong className={getTrendClass(trends.trends[selectedMetric])} style={{ fontSize: '24px', display: 'block', marginTop: '8px' }}>
-            {trends.trends[selectedMetric].toUpperCase()} {getTrendEmoji(trends.trends[selectedMetric])}
-          </strong>
+      <div className="comparison-grid">
+        <div className="comparison-card">
+          <span>Current run</span>
+          <strong>{currentScore}<small>/240</small></strong>
+          <p>{trends.date_range.end}</p>
         </div>
-
-        <div style={{ background: '#0a1728', padding: '18px', borderRadius: '12px', border: '1px solid var(--line-soft)' }}>
-          <p className="eyebrow">Best Run</p>
-          <strong style={{ fontSize: '24px', display: 'block', marginTop: '8px', color: 'var(--green)' }}>
-            Run #{trends.highlights[selectedMetric].best.run}
-          </strong>
-          <small style={{ color: 'var(--muted)', display: 'block', marginTop: '4px' }}>
-            Score: {trends.highlights[selectedMetric].best.score} • {trends.highlights[selectedMetric].best.date}
-          </small>
+        <div className="comparison-card personal-best-card">
+          <span>Personal best</span>
+          <strong>{personalBest?.score ?? "--"}<small>/240</small></strong>
+          <p>{bestContext(personalBest)}</p>
         </div>
-
-        <div style={{ background: '#0a1728', padding: '18px', borderRadius: '12px', border: '1px solid var(--line-soft)' }}>
-          <p className="eyebrow">Improvement Rate</p>
-          <strong style={{ fontSize: '24px', display: 'block', marginTop: '8px', color: trends.improvement_rates[selectedMetric] > 0 ? 'var(--green)' : 'var(--red)' }}>
-            {trends.improvement_rates[selectedMetric] > 0 ? '+' : ''}{trends.improvement_rates[selectedMetric]}%
-          </strong>
-          <small style={{ color: 'var(--muted)', display: 'block', marginTop: '4px' }}>Per run average</small>
-        </div>
-      </div>
-
-      {/* Progress Summary */}
-      <div style={{ marginTop: '24px', padding: '24px', background: '#0e1d31', borderRadius: '16px', border: '1px solid var(--line)' }}>
-        <h3 style={{ margin: '0 0 20px 0', fontSize: '18px' }}>First Run vs Current Run</h3>
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr auto 1fr auto', gap: '20px', alignItems: 'center' }}>
-          <div style={{ textAlign: 'center' }}>
-            <small style={{ color: 'var(--muted)', display: 'block', marginBottom: '8px' }}>
-              First Run ({trends.date_range.start})
-            </small>
-            <div style={{ fontSize: '48px', fontWeight: 'bold', color: 'var(--blue)' }}>
-              {currentMetricData.first}
-            </div>
-          </div>
-
-          <div style={{ fontSize: '32px', color: 'var(--muted)' }}>→</div>
-
-          <div style={{ textAlign: 'center' }}>
-            <small style={{ color: 'var(--muted)', display: 'block', marginBottom: '8px' }}>
-              Current Run ({trends.date_range.end})
-            </small>
-            <div style={{ fontSize: '48px', fontWeight: 'bold', color: 'var(--blue)' }}>
-              {currentMetricData.current}
-            </div>
-          </div>
-
-          <div style={{ textAlign: 'center', padding: '20px', background: 'rgba(106, 175, 255, 0.1)', borderRadius: '12px' }}>
-            <small style={{ color: 'var(--muted)', display: 'block', marginBottom: '8px' }}>Total Change</small>
-            <div style={{ fontSize: '32px', fontWeight: 'bold', color: currentMetricData.change > 0 ? 'var(--green)' : 'var(--red)' }}>
-              {currentMetricData.change > 0 ? '+' : ''}{currentMetricData.change}
-            </div>
-            <small style={{ fontSize: '18px', color: currentMetricData.change_percent > 0 ? 'var(--green)' : 'var(--red)' }}>
-              ({currentMetricData.change_percent > 0 ? '+' : ''}{currentMetricData.change_percent}%)
-            </small>
-          </div>
+        <div className="comparison-card comparison-copy">
+          <span>Current comparison</span>
+          <strong>{comparisonText(comparison)}</strong>
+          <p>Compared with your highest completed result.</p>
         </div>
       </div>
     </section>

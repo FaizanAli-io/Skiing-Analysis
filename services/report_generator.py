@@ -9,6 +9,8 @@ from typing import Any, Dict, List, Optional
 import httpx
 from dotenv import load_dotenv
 
+from services.personal_bests import compare_current_scores_to_previous
+
 try:
     from PIL import Image, ImageDraw, ImageFont
 except ImportError:
@@ -455,6 +457,61 @@ def _draw_badge(draw, text: str, x: int, y: int, color: tuple, font) -> None:
     draw.text((x + 17, y + 7), text, fill=color, font=font)
 
 
+def _personal_best_context_text(comparison: Optional[Dict[str, Any]]) -> str:
+    if not comparison:
+        return ""
+    status = comparison.get("status")
+    record = comparison.get("personal_best") or {}
+    score = int(comparison.get("personal_best_score") or 0)
+    session_number = int(record.get("session_number") or 0)
+    run_number = int(record.get("run_number") or 0)
+    record_date = _format_session_date(record.get("date")) or ""
+    context_parts = []
+    if session_number:
+        context_parts.append(f"Session {session_number}")
+    if run_number:
+        context_parts.append(f"Run {run_number}")
+    if record_date:
+        context_parts.append(record_date)
+    context = " | ".join(context_parts)
+
+    if status == "new_personal_best":
+        previous = comparison.get("previous_best") or {}
+        previous_score = previous.get("score")
+        change = (
+            int(comparison["current_score"]) - int(previous_score)
+            if previous_score is not None
+            else 0
+        )
+        return f"New personal best +{change}" if change else "New personal best"
+    if status == "baseline":
+        return f"Baseline established | {context}" if context else "Baseline established"
+    if status == "matches_personal_best":
+        return f"Matches personal best {score} | {context}".rstrip(" |")
+    points_below = int(comparison.get("points_below") or 0)
+    return f"Personal best {score} | {points_below} points below | {context}".rstrip(" |")
+
+
+def _compact_personal_best_text(comparison: Optional[Dict[str, Any]]) -> str:
+    if not comparison:
+        return ""
+    status = comparison.get("status")
+    if status == "new_personal_best":
+        previous = comparison.get("previous_best") or {}
+        previous_score = previous.get("score")
+        change = (
+            int(comparison["current_score"]) - int(previous_score)
+            if previous_score is not None
+            else 0
+        )
+        return f"NEW PB +{change}" if change else "BASELINE"
+    if status == "baseline":
+        return "BASELINE"
+    if status == "matches_personal_best":
+        return "MATCHES PB"
+    return f"PB {comparison['personal_best_score']} | {comparison['points_below']} BELOW"
+
+
 def _draw_score_bar(draw, x: int, y: int, w: int, score: float, color: tuple) -> None:
     score = max(0, min(MAX_SCORE, float(score or 0)))
     fill_w = int(w * (score / MAX_SCORE))
@@ -719,6 +776,17 @@ def _draw_header(canvas: Image.Image, draw, fonts: Dict[str, Any], logo_path: st
 
         cursor_x = name_x
         meta_y = line_y + 16
+        if payload.get("session_number"):
+            session_text = f"SESSION {payload['session_number']}"
+            draw.text((cursor_x, meta_y), session_text, fill=colors["blue"], font=meta_font)
+            cursor_x += int(draw.textlength(session_text, font=meta_font)) + 14
+
+        if payload.get("session_number") and payload.get("attempt_number"):
+            dot_cx = cursor_x + 2
+            dot_cy = meta_y + 10
+            draw.ellipse((dot_cx - 2, dot_cy - 2, dot_cx + 2, dot_cy + 2), fill=(100, 110, 120))
+            cursor_x += 14
+
         if payload.get("attempt_number"):
             run_text = f"RUN {payload['attempt_number']}"
             draw.text((cursor_x, meta_y), run_text, fill=colors["blue"], font=meta_font)
@@ -743,22 +811,60 @@ def _draw_header(canvas: Image.Image, draw, fonts: Dict[str, Any], logo_path: st
     draw.text((905, 122), f"{blue_iq:.0f}", fill=colors["text"], font=fonts["score"])
     draw.text((1032, 160), f"/ {MAX_SCORE}", fill=colors["muted"], font=fonts["body_bold"])
     _draw_badge(draw, _score_band(blue_iq).upper(), 905, 190, color, fonts["tiny_bold"])
+    comparison = payload.get("personal_best_comparisons", {}).get("blue_iq")
+    if comparison and comparison.get("is_new_personal_best"):
+        _draw_badge(draw, "NEW PB", 1055, 84, (34, 197, 94), fonts["tiny_bold"])
+    compact_text = _compact_personal_best_text(comparison)
+    if compact_text:
+        draw.text((1040, 202), compact_text, fill=(165, 181, 204), font=fonts["micro_bold"])
 
 
-def _draw_pillar_card(draw, x: int, y: int, w: int, h: int, name: str, score: float, section: Dict[str, str], fonts: Dict[str, Any]) -> None:
+def _draw_pillar_card(
+    draw,
+    x: int,
+    y: int,
+    w: int,
+    h: int,
+    name: str,
+    score: float,
+    section: Dict[str, str],
+    fonts: Dict[str, Any],
+    comparison: Optional[Dict[str, Any]] = None,
+) -> None:
     color = _score_color(score)
     draw.rounded_rectangle((x, y, x + w, y + h), radius=22, fill=(12, 27, 47), outline=(34, 54, 82), width=2)
     draw.rectangle((x, y + 24, x + 5, y + h - 24), fill=color)
     draw.text((x + 28, y + 26), name, fill=(238, 246, 255), font=fonts["card_title"])
+    if comparison and comparison.get("is_new_personal_best"):
+        _draw_badge(draw, "NEW PB", x + 155, y + 24, (34, 197, 94), fonts["tiny_bold"])
     draw.text((x + w - 178, y + 25), f"{score:.0f}", fill=(238, 246, 255), font=fonts["metric_score"])
     draw.text((x + w - 88, y + 40), f"/ {MAX_SCORE}", fill=(165, 181, 204), font=fonts["small_bold"])
     _draw_badge(draw, _score_band(score).upper(), x + w - 184, y + 74, color, fonts["tiny_bold"])
     _draw_score_bar(draw, x + 28, y + 90, w - 220, score, color)
 
+    comparison_text = _personal_best_context_text(comparison)
+    body_y = y + 122
+    max_lines = 4
+    if comparison_text:
+        fitted_comparison = _fit_text_to_lines(
+            draw,
+            comparison_text,
+            fonts["micro_bold"],
+            w - 56,
+            1,
+        )
+        draw.text(
+            (x + 28, y + 108),
+            fitted_comparison,
+            fill=(106, 175, 255),
+            font=fonts["micro_bold"],
+        )
+        body_y = y + 137
+
     summary = _coerce_text(section.get("summary"))
     coaching_focus = _coerce_text(section.get("coaching_focus"))
-    body = _fit_text_to_lines(draw, f"{summary} {coaching_focus}".strip(), fonts["small"], w - 56, 4)
-    _draw_wrapped(draw, body, x + 28, y + 122, w - 56, fonts["small"], (180, 196, 218), line_gap=5, max_lines=4)
+    body = _fit_text_to_lines(draw, f"{summary} {coaching_focus}".strip(), fonts["small"], w - 56, max_lines)
+    _draw_wrapped(draw, body, x + 28, body_y, w - 56, fonts["small"], (180, 196, 218), line_gap=5, max_lines=max_lines)
 
 
 def _draw_snapshot_card(canvas: Image.Image, draw, x: int, y: int, w: int, h: int, snapshot_path: str, fonts: Dict[str, Any]) -> None:
@@ -800,6 +906,7 @@ def _draw_pdf_report(report_path: str, payload: Dict[str, Any], sections: Dict[s
         "body_bold": _load_font(22, bold=True),
         "small": _load_font(18),
         "small_bold": _load_font(17, bold=True),
+        "micro_bold": _load_font(14, bold=True),
         "tiny_bold": _load_font(13, bold=True),
         "score": _load_font(62, bold=True),
         "metric_score": _load_font(34, bold=True),
@@ -817,37 +924,59 @@ def _draw_pdf_report(report_path: str, payload: Dict[str, Any], sections: Dict[s
     snapshot_path = payload.get("snapshot_path")
     has_snapshot = bool(snapshot_path and os.path.exists(snapshot_path))
     if has_snapshot:
-        draw.rounded_rectangle((60, 270, 715, 570), radius=28, fill=(10, 24, 42), outline=(34, 54, 82), width=2)
-        draw.text((92, 302), "Overall Performance", fill=(238, 246, 255), font=fonts["section"])
+        draw.rounded_rectangle((60, 300, 715, 600), radius=28, fill=(10, 24, 42), outline=(34, 54, 82), width=2)
+        draw.text((92, 332), "Overall Performance", fill=(238, 246, 255), font=fonts["section"])
         overall_text = _fit_text_to_lines(draw, sections["overall"], fonts["body"], 595, 6)
-        _draw_wrapped(draw, overall_text, 92, 350, 595, fonts["body"], (186, 202, 224), line_gap=8, max_lines=6)
-        _draw_snapshot_card(canvas, draw, 745, 270, 470, 300, snapshot_path, fonts)
-        cards_start_y = 610
+        _draw_wrapped(draw, overall_text, 92, 380, 595, fonts["body"], (186, 202, 224), line_gap=8, max_lines=6)
+        _draw_snapshot_card(canvas, draw, 745, 300, 470, 300, snapshot_path, fonts)
+        cards_start_y = 640
     else:
-        draw.rounded_rectangle((60, 270, 1215, 470), radius=28, fill=(10, 24, 42), outline=(34, 54, 82), width=2)
-        draw.text((92, 302), "Overall Performance", fill=(238, 246, 255), font=fonts["section"])
+        draw.rounded_rectangle((60, 300, 1215, 500), radius=28, fill=(10, 24, 42), outline=(34, 54, 82), width=2)
+        draw.text((92, 332), "Overall Performance", fill=(238, 246, 255), font=fonts["section"])
         overall_text = _fit_text_to_lines(draw, sections["overall"], fonts["body"], 1090, 4)
-        _draw_wrapped(draw, overall_text, 92, 350, 1090, fonts["body"], (186, 202, 224), line_gap=8, max_lines=4)
-        cards_start_y = 515
+        _draw_wrapped(draw, overall_text, 92, 380, 1090, fonts["body"], (186, 202, 224), line_gap=8, max_lines=4)
+        cards_start_y = 545
 
     scores = payload["final_scores"]
     pillar_sections = sections["pillars"]
     card_w = 555
-    card_h = 235 if has_snapshot else 255
+    card_h = 250 if has_snapshot else 270
     second_row_y = cards_start_y + card_h + 30
-    _draw_pillar_card(draw, 60, cards_start_y, card_w, card_h, "Pressure", scores["pressure"], pillar_sections["pressure"], fonts)
-    _draw_pillar_card(draw, 660, cards_start_y, card_w, card_h, "Balance", scores["balance"], pillar_sections["balance"], fonts)
-    _draw_pillar_card(draw, 60, second_row_y, card_w, card_h, "Rotation", scores["rotation"], pillar_sections["rotation"], fonts)
-    _draw_pillar_card(draw, 660, second_row_y, card_w, card_h, "Edging", scores["edging"], pillar_sections["edging"], fonts)
+    comparisons = payload.get("personal_best_comparisons", {})
+    _draw_pillar_card(draw, 60, cards_start_y, card_w, card_h, "Pressure", scores["pressure"], pillar_sections["pressure"], fonts, comparisons.get("pressure"))
+    _draw_pillar_card(draw, 660, cards_start_y, card_w, card_h, "Balance", scores["balance"], pillar_sections["balance"], fonts, comparisons.get("balance"))
+    _draw_pillar_card(draw, 60, second_row_y, card_w, card_h, "Rotation", scores["rotation"], pillar_sections["rotation"], fonts, comparisons.get("rotation"))
+    _draw_pillar_card(draw, 660, second_row_y, card_w, card_h, "Edging", scores["edging"], pillar_sections["edging"], fonts, comparisons.get("edging"))
 
     improvement_y = second_row_y + card_h + 35
     draw.rounded_rectangle((60, improvement_y, 1215, 1494), radius=28, fill=(10, 24, 42), outline=(34, 54, 82), width=2)
     draw.text((92, improvement_y + 36), "Improvement Areas", fill=(238, 246, 255), font=fonts["section"])
     y = improvement_y + 90
-    for index, item in enumerate(sections["improvement_areas"][:4], start=1):
+    improvement_limit = 3 if has_snapshot else 4
+    for index, item in enumerate(
+        sections["improvement_areas"][:improvement_limit],
+        start=1,
+    ):
         draw.ellipse((96, y + 7, 116, y + 27), fill=(106, 175, 255))
         draw.text((102, y + 4), str(index), fill=(5, 10, 22), font=fonts["tiny_bold"])
-        y = _draw_wrapped(draw, item, 136, y, 1010, fonts["body"], (186, 202, 224), line_gap=6, max_lines=1 if has_snapshot else 2) + 12
+        fitted_item = _fit_text_to_lines(
+            draw,
+            item,
+            fonts["body"],
+            1010,
+            2,
+        )
+        y = _draw_wrapped(
+            draw,
+            fitted_item,
+            136,
+            y,
+            1010,
+            fonts["body"],
+            (186, 202, 224),
+            line_gap=6,
+            max_lines=2,
+        ) + 12
 
     draw.text((72, 1542), "Score scale: 60-129 Emerging | 130-169 Developing | 170-199 Proficient | 200-240 Excellent", fill=(125, 143, 166), font=fonts["small"])
     footer_parts = [f"Duration: {payload['duration_seconds']} sec"]
@@ -897,7 +1026,15 @@ def generate_basic_report(
             "user_name": context.get("user_name"),
             "attempt_number": context.get("attempt_number"),
             "session_date": context.get("session_date"),
+            "session_number": context.get("session_number"),
         })
+    payload["personal_best_comparisons"] = compare_current_scores_to_previous(
+        final_scores,
+        (context or {}).get("previous_personal_bests") or {},
+        session_date=(context or {}).get("session_date"),
+        session_number=int((context or {}).get("session_number") or 0),
+        run_number=int((context or {}).get("attempt_number") or 0),
+    )
 
     sections = _generate_openai_sections(payload, use_openai=use_openai)
     output_path = result["output_path"]
@@ -912,6 +1049,10 @@ def generate_basic_report(
                 for name, section in sections["pillars"].items()
             ],
             "Improvement Areas: " + " ".join(_clean_report_text(item) for item in sections["improvement_areas"]),
+            "Personal Bests: " + " ".join(
+                _personal_best_context_text(comparison)
+                for comparison in payload["personal_best_comparisons"].values()
+            ),
         ]
     )
 
@@ -920,4 +1061,5 @@ def generate_basic_report(
         "report_path": report_path,
         "score_windows": score_windows,
         "report_sections": sections,
+        "personal_best_comparisons": payload["personal_best_comparisons"],
     }

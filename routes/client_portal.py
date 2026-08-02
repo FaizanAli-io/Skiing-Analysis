@@ -1,3 +1,4 @@
+from datetime import date, datetime
 from typing import List
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -7,11 +8,26 @@ from database import get_db
 from models.person import Person
 from models.video_analysis import VideoAnalysis
 from schemas.video_analysis import VideoAnalysisOut
+from schemas.personal_best import PersonalBestsResponse
 from services.auth import get_current_user
 from services.aws_s3 import S3Manager
+from services.personal_bests import (
+    METRIC_KEYS,
+    build_personal_best_history,
+    display_score,
+    enrich_attempts,
+    personal_bests_for_person,
+)
 
 
 router = APIRouter(prefix="/me", tags=["Client Portal"])
+
+
+def _attempt_date_label(attempt: VideoAnalysis) -> str:
+    value = attempt.created_at or attempt.timestamp
+    if isinstance(value, (datetime, date)):
+        return value.strftime("%Y-%m-%d")
+    return str(value)[:10] if value else "Unknown date"
 
 
 @router.get("/attempts", response_model=List[VideoAnalysisOut])
@@ -37,7 +53,8 @@ def my_attempts(
                 attempt.video_link = S3Manager.get_video_url(attempt.s3_video_key, expiration=86400)
             if attempt.s3_report_key:
                 attempt.report_path = S3Manager.get_report_url(attempt.s3_report_key, expiration=86400)
-    
+
+    enrich_attempts(db, attempts)
     return attempts
 
 
@@ -54,7 +71,19 @@ def my_attempt_detail(
     )
     if not attempt:
         raise HTTPException(status_code=404, detail="Attempt not found")
+    enrich_attempts(db, [attempt])
     return attempt
+
+
+@router.get("/personal-bests", response_model=PersonalBestsResponse)
+def my_personal_bests(
+    current_user: Person = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    return {
+        "person_id": current_user.id,
+        "personal_bests": personal_bests_for_person(db, current_user.id),
+    }
 
 
 @router.get("/trends")
@@ -63,146 +92,51 @@ def get_performance_trends(
     current_user: Person = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Get performance trends over multiple runs for charts and analysis"""
-    
-    attempts = (
+    """Return neutral run history with current-to-personal-best context."""
+
+    all_attempts = (
         db.query(VideoAnalysis)
-        .filter(VideoAnalysis.person_id == current_user.id)
-        .order_by(VideoAnalysis.created_at.desc())
-        .limit(limit)
+        .filter(
+            VideoAnalysis.person_id == current_user.id,
+            (VideoAnalysis.status == "completed") | (VideoAnalysis.status.is_(None)),
+        )
+        .order_by(VideoAnalysis.created_at.asc().nullsfirst(), VideoAnalysis.id.asc())
         .all()
     )
-    
-    if len(attempts) < 2:
-        return {"error": "Need at least 2 runs for trend analysis", "total_runs": len(attempts)}
-    
-    # Reverse to get oldest first for trend calculation
-    attempts = list(reversed(attempts))
-    
-    # Extract data for each metric
-    dates = [a.created_at.strftime("%Y-%m-%d") for a in attempts]
-    blue_iq = [round(a.blue_iq_score or 0, 1) for a in attempts]
-    balance = [round(a.balance_score or 0, 1) for a in attempts]
-    rotation = [round(a.rotation_score or 0, 1) for a in attempts]
-    pressure = [round(a.pressure_score or 0, 1) for a in attempts]
-    edging = [round(a.edging_score or 0, 1) for a in attempts]
-    turns = [a.turns or 0 for a in attempts]
-    
-    def calculate_trend(values):
-        """Calculate if trend is improving, declining, or stable using linear regression"""
-        if len(values) < 2:
-            return "stable"
-        
-        n = len(values)
-        x = list(range(n))
-        x_mean = sum(x) / n
-        y_mean = sum(values) / n
-        
-        numerator = sum((x[i] - x_mean) * (values[i] - y_mean) for i in range(n))
-        denominator = sum((x[i] - x_mean) ** 2 for i in range(n))
-        
-        if denominator == 0:
-            return "stable"
-        
-        slope = numerator / denominator
-        
-        if slope > 1:
-            return "improving"
-        elif slope < -1:
-            return "declining"
-        else:
-            return "stable"
-    
-    def calculate_improvement_rate(values):
-        """Calculate average improvement percentage per run"""
-        if len(values) < 2:
-            return 0
-        first = values[0]
-        last = values[-1]
-        runs = len(values) - 1
-        if first == 0:
-            return 0
-        return round(((last - first) / first / runs) * 100, 2)
-    
-    def find_best_worst(values, dates_list):
-        """Find best and worst run indices"""
-        if not values:
-            return None
-        best_idx = values.index(max(values))
-        worst_idx = values.index(min(values))
-        return {
-            "best": {"date": dates_list[best_idx], "score": values[best_idx], "run": best_idx + 1},
-            "worst": {"date": dates_list[worst_idx], "score": values[worst_idx], "run": worst_idx + 1}
-        }
-    
-    def calc_change(first_val, last_val):
-        """Calculate change and percentage"""
-        change = round(last_val - first_val, 1)
-        change_percent = round(((last_val - first_val) / first_val * 100), 1) if first_val > 0 else 0
-        return {"change": change, "change_percent": change_percent}
-    
+
+    if not all_attempts:
+        return {"error": "No completed runs are available yet", "total_runs": 0}
+
+    history = build_personal_best_history(all_attempts)
+    latest = all_attempts[-1]
+    latest_comparisons = history["comparisons_by_attempt"].get(latest.id, {})
+    chart_limit = max(1, min(int(limit), 100))
+    attempts = all_attempts[-chart_limit:]
+    dates = [_attempt_date_label(attempt) for attempt in attempts]
+    runs = [int(attempt.attempt_number or attempt.id) for attempt in attempts]
+    time_series = {
+        "dates": dates,
+        "runs": runs,
+        "turns": [attempt.turns or 0 for attempt in attempts],
+    }
+    for metric in METRIC_KEYS:
+        time_series[metric] = [
+            display_score(
+                attempt.blue_iq_score
+                if metric == "blue_iq"
+                else getattr(attempt, f"{metric}_score")
+            ) or 0
+            for attempt in attempts
+        ]
+
     return {
-        "total_runs": len(attempts),
+        "total_runs": len(all_attempts),
+        "displayed_runs": len(attempts),
         "date_range": {
             "start": dates[0],
             "end": dates[-1]
         },
-        "time_series": {
-            "dates": dates,
-            "blue_iq": blue_iq,
-            "balance": balance,
-            "rotation": rotation,
-            "pressure": pressure,
-            "edging": edging,
-            "turns": turns
-        },
-        "trends": {
-            "blue_iq": calculate_trend(blue_iq),
-            "balance": calculate_trend(balance),
-            "rotation": calculate_trend(rotation),
-            "pressure": calculate_trend(pressure),
-            "edging": calculate_trend(edging)
-        },
-        "improvement_rates": {
-            "blue_iq": calculate_improvement_rate(blue_iq),
-            "balance": calculate_improvement_rate(balance),
-            "rotation": calculate_improvement_rate(rotation),
-            "pressure": calculate_improvement_rate(pressure),
-            "edging": calculate_improvement_rate(edging)
-        },
-        "highlights": {
-            "blue_iq": find_best_worst(blue_iq, dates),
-            "balance": find_best_worst(balance, dates),
-            "rotation": find_best_worst(rotation, dates),
-            "pressure": find_best_worst(pressure, dates),
-            "edging": find_best_worst(edging, dates)
-        },
-        "current_vs_first": {
-            "blue_iq": {
-                "first": blue_iq[0],
-                "current": blue_iq[-1],
-                **calc_change(blue_iq[0], blue_iq[-1])
-            },
-            "balance": {
-                "first": balance[0],
-                "current": balance[-1],
-                **calc_change(balance[0], balance[-1])
-            },
-            "rotation": {
-                "first": rotation[0],
-                "current": rotation[-1],
-                **calc_change(rotation[0], rotation[-1])
-            },
-            "pressure": {
-                "first": pressure[0],
-                "current": pressure[-1],
-                **calc_change(pressure[0], pressure[-1])
-            },
-            "edging": {
-                "first": edging[0],
-                "current": edging[-1],
-                **calc_change(edging[0], edging[-1])
-            }
-        }
+        "time_series": time_series,
+        "personal_bests": history["personal_bests"],
+        "current_vs_personal_best": latest_comparisons,
     }
-
