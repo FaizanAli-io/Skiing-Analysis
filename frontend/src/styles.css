@@ -23,6 +23,7 @@
 body {
   margin: 0;
   min-height: 100vh;
+  overflow-x: hidden;
   background:
     radial-gradient(circle at 18% 8%, rgba(106, 175, 255, 0.16), transparent 34%),
     radial-gradient(circle at 80% 12%, rgba(34, 197, 94, 0.08), transparent 28%),
@@ -234,6 +235,15 @@ select:focus {
   max-width: none;
   margin: 0;
   padding: 24px clamp(20px, 2.5vw, 48px) 64px;
+  overflow-x: hidden;
+}
+
+.app-shell > *,
+.admin-layout > *,
+.upload-panel input,
+.upload-panel select {
+  min-width: 0;
+  max-width: 100%;
 }
 
 .app-header {
@@ -266,6 +276,12 @@ select:focus {
   margin-bottom: 24px;
 }
 
+.upload-workspace {
+  display: grid;
+  grid-template-columns: minmax(0, 760px);
+  margin-bottom: 24px;
+}
+
 .summary-card,
 .upload-panel,
 .user-panel,
@@ -295,6 +311,59 @@ select:focus {
 
 .section-block {
   margin-bottom: 24px;
+}
+
+.admin-view-tabs {
+  display: inline-flex;
+  gap: 4px;
+  margin-bottom: 24px;
+  padding: 4px;
+  background: #091426;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+}
+
+.admin-view-tabs button {
+  min-width: 132px;
+  min-height: 40px;
+  padding: 0 18px;
+  color: var(--muted);
+  background: transparent;
+  border: 0;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.admin-view-tabs button:hover,
+.admin-view-tabs button:focus-visible {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.05);
+  outline: none;
+}
+
+.admin-view-tabs button.active {
+  color: #06101d;
+  background: var(--blue);
+}
+
+.athlete-directory-panel {
+  margin-bottom: 24px;
+}
+
+.athlete-directory-heading {
+  align-items: center;
+}
+
+.directory-count {
+  flex: 0 0 auto;
+  padding: 7px 10px;
+  color: var(--blue);
+  background: rgba(106, 175, 255, 0.08);
+  border: 1px solid rgba(106, 175, 255, 0.24);
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 800;
 }
 
 .section-heading {
@@ -537,6 +606,37 @@ select:focus {
   background: var(--blue);
 }
 
+.leaderboard-controls {
+  display: flex;
+  align-items: end;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.top-k-control,
+.client-filter-control {
+  display: grid;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.top-k-control select,
+.client-filter-control select {
+  min-height: 40px;
+  padding: 0 34px 0 12px;
+  color: var(--text);
+  background: #091426;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 700;
+  text-transform: none;
+}
+
 .history-chart {
   height: 340px;
   overflow: hidden;
@@ -632,6 +732,174 @@ select:focus {
 .leaderboard-score {
   justify-self: end;
   font-size: 24px;
+}
+
+.selected-athlete-panel {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 28px;
+}
+
+.profile-back-row {
+  margin-bottom: 14px;
+}
+
+.profile-back-row .secondary-button {
+  min-height: 40px;
+}
+
+.profile-workspace {
+  align-items: stretch;
+}
+
+.fixed-upload-athlete {
+  display: grid;
+  gap: 3px;
+  padding: 12px 14px;
+  background: rgba(106, 175, 255, 0.07);
+  border: 1px solid rgba(106, 175, 255, 0.24);
+  border-radius: 8px;
+}
+
+.fixed-upload-athlete span {
+  color: var(--text);
+  font-weight: 800;
+}
+
+.fixed-upload-athlete small {
+  color: var(--muted);
+}
+
+.latest-run-panel {
+  display: flex;
+  flex-direction: column;
+}
+
+.latest-run-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.latest-run-heading h2,
+.latest-run-heading p {
+  margin: 0;
+}
+
+.latest-run-heading p,
+.empty-copy {
+  margin-top: 6px;
+  color: var(--muted);
+  line-height: 1.6;
+}
+
+.latest-score-row {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+  margin-top: 28px;
+  padding: 18px 0;
+  border-top: 1px solid var(--line-soft);
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.latest-score-row span {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.latest-score-row strong {
+  font-size: 34px;
+}
+
+.latest-score-row strong small {
+  margin-left: 3px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.selected-athlete-identity {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  min-width: 0;
+}
+
+.selected-athlete-identity h2,
+.selected-athlete-identity p {
+  margin: 0;
+}
+
+.selected-athlete-identity h2 {
+  margin-top: 3px;
+  font-size: 26px;
+}
+
+.selected-athlete-identity > div:last-child > p:last-child {
+  margin-top: 5px;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.athlete-avatar {
+  flex: 0 0 52px;
+  display: grid;
+  width: 52px;
+  height: 52px;
+  place-items: center;
+  color: #06101d;
+  background: var(--blue);
+  border-radius: 50%;
+  font-size: 22px;
+  font-weight: 900;
+}
+
+.selected-athlete-stats {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(130px, 1fr));
+  gap: 10px;
+  width: min(660px, 58%);
+}
+
+.selected-athlete-stats > div {
+  min-width: 0;
+  padding: 14px 16px;
+  background: rgba(255, 255, 255, 0.025);
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+}
+
+.selected-athlete-stats span {
+  display: block;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.selected-athlete-stats strong {
+  display: block;
+  margin-top: 7px;
+  font-size: 26px;
+}
+
+.selected-athlete-stats strong small {
+  margin-left: 3px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.selected-athlete-stats .date-stat {
+  font-size: 15px;
+  line-height: 1.4;
+}
+
+.load-more-row {
+  margin-top: 24px;
+  text-align: center;
 }
 
 .card-actions {
@@ -961,6 +1229,25 @@ select:focus {
   font-weight: 800;
 }
 
+.client-search {
+  display: grid;
+  gap: 7px;
+  margin-bottom: 14px;
+}
+
+.client-search > span {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.client-search input {
+  min-height: 42px;
+  border-radius: 8px;
+}
+
 .user-list {
   display: grid;
   gap: 10px;
@@ -968,13 +1255,36 @@ select:focus {
   overflow: auto;
 }
 
+.athlete-directory-list {
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  max-height: none;
+  overflow: visible;
+}
+
 .user-row {
+  position: relative;
   display: grid;
   gap: 3px;
+  width: 100%;
   padding: 12px 14px;
+  color: var(--text);
+  text-align: left;
   background: rgba(255, 255, 255, 0.035);
   border: 1px solid var(--line-soft);
   border-radius: 10px;
+}
+
+.user-row:hover,
+.user-row:focus-visible {
+  background: rgba(106, 175, 255, 0.07);
+  border-color: rgba(106, 175, 255, 0.34);
+  outline: none;
+}
+
+.user-row.active {
+  background: rgba(106, 175, 255, 0.1);
+  border-color: var(--blue);
+  box-shadow: inset 3px 0 0 var(--blue);
 }
 
 .user-row span {
@@ -983,6 +1293,30 @@ select:focus {
 
 .user-row small {
   color: var(--muted);
+}
+
+.user-row b {
+  position: absolute;
+  top: 50%;
+  right: 14px;
+  color: var(--blue);
+  font-size: 11px;
+  transform: translateY(-50%);
+}
+
+.text-button {
+  padding: 7px 9px;
+  color: var(--blue);
+  background: transparent;
+  border: 0;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.text-button:hover,
+.text-button:focus-visible {
+  color: var(--text);
+  outline: none;
 }
 
 .empty-state {
@@ -1017,6 +1351,16 @@ select:focus {
   .section-heading {
     flex-direction: column;
     align-items: stretch;
+  }
+
+  .admin-view-tabs {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    width: 100%;
+  }
+
+  .admin-view-tabs button {
+    min-width: 0;
   }
 
   .run-graph-backdrop {
@@ -1095,6 +1439,26 @@ select:focus {
     width: 100%;
   }
 
+  .leaderboard-controls,
+  .selected-athlete-panel {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .latest-run-heading {
+    align-items: flex-start;
+  }
+
+  .top-k-control select,
+  .client-filter-control select {
+    width: 100%;
+  }
+
+  .selected-athlete-stats {
+    grid-template-columns: 1fr;
+    width: 100%;
+  }
+
   .metric-tabs button {
     flex: 1 1 auto;
   }
@@ -1105,5 +1469,30 @@ select:focus {
 
   .leaderboard-row {
     width: 720px;
+  }
+}
+
+@media (max-width: 520px) {
+  .app-shell {
+    padding: 14px 14px 40px;
+  }
+
+  .app-header,
+  .section-block,
+  .upload-panel,
+  .user-panel {
+    padding: 20px;
+  }
+
+  .brand {
+    font-size: 24px;
+  }
+
+  .selected-athlete-identity {
+    align-items: flex-start;
+  }
+
+  .admin-view-tabs {
+    grid-template-columns: 1fr;
   }
 }

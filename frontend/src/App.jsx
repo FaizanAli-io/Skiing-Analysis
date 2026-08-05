@@ -12,6 +12,53 @@ const SCORE_METRICS = [
   ["edging", "Edging"],
 ];
 
+function normalizeSearchText(value) {
+  return String(value || "")
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function fuzzyFieldScore(field, term) {
+  if (!field || !term) return Number.POSITIVE_INFINITY;
+  if (field === term) return 0;
+  if (field.startsWith(term)) return 1 + ((field.length - term.length) / 1000);
+
+  const substringIndex = field.indexOf(term);
+  if (substringIndex >= 0) return 3 + (substringIndex / 100);
+
+  let termIndex = 0;
+  let firstMatch = -1;
+  let previousMatch = -1;
+  let skippedCharacters = 0;
+
+  for (let fieldIndex = 0; fieldIndex < field.length && termIndex < term.length; fieldIndex += 1) {
+    if (field[fieldIndex] !== term[termIndex]) continue;
+    if (firstMatch < 0) firstMatch = fieldIndex;
+    if (previousMatch >= 0) skippedCharacters += fieldIndex - previousMatch - 1;
+    previousMatch = fieldIndex;
+    termIndex += 1;
+  }
+
+  if (termIndex !== term.length) return Number.POSITIVE_INFINITY;
+  return 10 + skippedCharacters + (firstMatch / 100);
+}
+
+function clientSearchScore(client, query) {
+  const terms = normalizeSearchText(query).split(" ").filter(Boolean);
+  if (!terms.length) return 0;
+
+  const fields = [normalizeSearchText(client.name), normalizeSearchText(client.email)];
+  return terms.reduce((total, term) => {
+    const score = Math.min(...fields.map((field) => fuzzyFieldScore(field, term)));
+    return Number.isFinite(total) && Number.isFinite(score)
+      ? total + score
+      : Number.POSITIVE_INFINITY;
+  }, 0);
+}
+
 function useAutoRefresh(refresh, enabled = true) {
   const refreshRef = useRef(refresh);
 
@@ -295,7 +342,8 @@ function PersonalBestPanel({ records, title = "Personal bests", description }) {
 
 function LeaderboardPanel({ leaderboards }) {
   const [metric, setMetric] = useState("blue_iq");
-  const rows = leaderboards?.[metric] || [];
+  const [topK, setTopK] = useState(10);
+  const rows = (leaderboards?.[metric] || []).slice(0, topK);
   const metricLabel = SCORE_METRICS.find(([key]) => key === metric)?.[1] || metric;
 
   return (
@@ -306,19 +354,29 @@ function LeaderboardPanel({ leaderboards }) {
           <h2>Personal-best leaderboards</h2>
           <p>Each athlete appears once, using their highest completed result.</p>
         </div>
-        <div className="metric-tabs" role="tablist" aria-label="Leaderboard metric">
-          {SCORE_METRICS.map(([key, label]) => (
-            <button
-              type="button"
-              role="tab"
-              aria-selected={metric === key}
-              className={metric === key ? "active" : ""}
-              key={key}
-              onClick={() => setMetric(key)}
-            >
-              {label}
-            </button>
-          ))}
+        <div className="leaderboard-controls">
+          <div className="metric-tabs" role="tablist" aria-label="Leaderboard metric">
+            {SCORE_METRICS.map(([key, label]) => (
+              <button
+                type="button"
+                role="tab"
+                aria-selected={metric === key}
+                className={metric === key ? "active" : ""}
+                key={key}
+                onClick={() => setMetric(key)}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+          <label className="top-k-control">
+            <span>Ranking size</span>
+            <select value={topK} onChange={(event) => setTopK(Number(event.target.value))}>
+              {[5, 10, 25, 50].map((value) => (
+                <option value={value} key={value}>Top {value}</option>
+              ))}
+            </select>
+          </label>
         </div>
       </div>
       <div className="leaderboard-table" role="table" aria-label={`${metricLabel} leaderboard`}>
@@ -391,6 +449,106 @@ function AttemptCard({ attempt, onViewAnalysis }) {
         {report && <a href={report} target="_blank" rel="noreferrer">View report</a>}
       </div>
     </article>
+  );
+}
+
+function UploadAnalysisPanel({ token, clients = [], fixedUser = null, onCompleted }) {
+  const [uploadState, setUploadState] = useState("");
+  const [uploadError, setUploadError] = useState("");
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
+  async function waitForJob(jobId) {
+    for (let pollCount = 0; pollCount < 120; pollCount += 1) {
+      const status = await api(`/jobs/${jobId}`, { token });
+
+      if (status.status === "completed") {
+        setUploadState("Analysis complete!");
+        if (onCompleted) await onCompleted();
+        return;
+      }
+      if (status.status === "failed") {
+        throw new Error(`Analysis failed: ${status.error_message || "Unknown error"}`);
+      }
+
+      const progressText = status.progress > 0 ? ` (${status.progress}%)` : "";
+      setUploadState(`Processing video${progressText}...`);
+      await new Promise((resolve) => window.setTimeout(resolve, 5000));
+    }
+
+    setUploadState("Analysis is taking longer than expected. Check back later.");
+  }
+
+  async function submitUpload(event) {
+    event.preventDefault();
+    const formElement = event.currentTarget;
+    setUploadError("");
+    setUploadState("Uploading video...");
+    setIsSubmitting(true);
+
+    try {
+      const response = await api("/analyze-premium-overlay/", {
+        method: "POST",
+        token,
+        body: new FormData(formElement),
+        isForm: true,
+      });
+
+      formElement.reset();
+      if (response.job_id) {
+        setUploadState("Video uploaded. Processing started...");
+        await waitForJob(response.job_id);
+      } else {
+        setUploadState("Analysis complete.");
+        if (onCompleted) await onCompleted();
+      }
+    } catch (err) {
+      setUploadState("");
+      setUploadError(err.message);
+    } finally {
+      setIsSubmitting(false);
+    }
+  }
+
+  return (
+    <form className="upload-panel" onSubmit={submitUpload}>
+      <p className="eyebrow">New analysis</p>
+      <h2>{fixedUser ? `Upload a run for ${fixedUser.name}` : "Upload client video"}</h2>
+      {fixedUser ? (
+        <>
+          <input type="hidden" name="user_id" value={fixedUser.id} />
+          <div className="fixed-upload-athlete">
+            <span>{fixedUser.name}</span>
+            <small>{fixedUser.email}</small>
+          </div>
+        </>
+      ) : (
+        <>
+          <label>Select user</label>
+          <select name="user_id" required>
+            <option value="">Choose a client</option>
+            {clients.map((user) => (
+              <option key={user.id} value={user.id}>{user.name} - {user.email}</option>
+            ))}
+          </select>
+        </>
+      )}
+      <label>Display mode</label>
+      <select name="display_mode" defaultValue="coach">
+        <option value="coach">Coach</option>
+        <option value="athlete">Athlete</option>
+      </select>
+      <label className="checkbox-row">
+        <input type="checkbox" name="report" value="true" defaultChecked />
+        Generate PDF report
+      </label>
+      <label>Video file</label>
+      <input type="file" name="file" accept="video/*" required />
+      <button className="primary-button" disabled={isSubmitting}>
+        {isSubmitting ? "Processing..." : "Run analysis"}
+      </button>
+      {uploadError && <div className="alert">{uploadError}</div>}
+      {uploadState && <p className="status-text">{uploadState}</p>}
+    </form>
   );
 }
 
@@ -485,20 +643,206 @@ function ClientDashboard() {
   );
 }
 
+function AdminAthleteProfile({ userId }) {
+  const token = getToken("admin");
+  const [user, setUser] = useState(null);
+  const [attempts, setAttempts] = useState([]);
+  const [personalBests, setPersonalBests] = useState({});
+  const [displayCount, setDisplayCount] = useState(4);
+  const [graphAttempt, setGraphAttempt] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+
+  async function loadProfileActivity() {
+    const [attemptRows, bestRows] = await Promise.all([
+      api(`/admin/users/${userId}/attempts?limit=100`, { token }),
+      api(`/admin/users/${userId}/personal-bests`, { token }),
+    ]);
+    setAttempts(attemptRows);
+    setPersonalBests(bestRows.personal_bests || {});
+  }
+
+  useEffect(() => {
+    if (!token) {
+      routeTo("/admin-login");
+      return;
+    }
+
+    let cancelled = false;
+    setLoading(true);
+    Promise.all([
+      api(`/admin/users/${userId}`, { token }),
+      api(`/admin/users/${userId}/attempts?limit=100`, { token }),
+      api(`/admin/users/${userId}/personal-bests`, { token }),
+    ])
+      .then(([profile, attemptRows, bestRows]) => {
+        if (cancelled) return;
+        setUser(profile);
+        setAttempts(attemptRows);
+        setPersonalBests(bestRows.personal_bests || {});
+      })
+      .catch((err) => {
+        if (!cancelled) setError(err.message);
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [token, userId]);
+
+  useAutoRefresh(loadProfileActivity, Boolean(token && userId));
+
+  const completedAttempts = attempts.filter((attempt) => !attempt.status || attempt.status === "completed");
+  const latest = completedAttempts[0];
+  const latestBlueIq = latest
+    ? Math.ceil(Number(latest.blue_iq_score || (
+      Number(latest.pressure_score || 0)
+      + Number(latest.balance_score || 0)
+      + Number(latest.rotation_score || 0)
+      + Number(latest.edging_score || 0)
+    ) / 4))
+    : null;
+  const displayedAttempts = completedAttempts.slice(0, displayCount);
+  const hasMore = displayCount < completedAttempts.length;
+  const latestVideo = latest ? fileUrl(latest.video_link || latest.output_video_path) : null;
+  const latestReport = latest ? fileUrl(latest.report_path) : null;
+
+  return (
+    <main className="app-shell">
+      <div className="profile-back-row">
+        <button type="button" className="secondary-button" onClick={() => routeTo("/admin")}>Back to athletes</button>
+      </div>
+      <AppHeader
+        role="Admin / Athlete profile"
+        title={user?.name || "Athlete profile"}
+        subtitle="Upload new runs and review this athlete's generated videos, reports, and score history."
+        onLogout={() => {
+          clearToken("admin");
+          routeTo("/admin-login");
+        }}
+      />
+      {error && <div className="alert wide">{error}</div>}
+      {loading ? (
+        <section className="section-block"><div className="empty-state">Loading athlete profile...</div></section>
+      ) : user ? (
+        <>
+          <section className="section-block selected-athlete-panel">
+            <div className="selected-athlete-identity">
+              <div className="athlete-avatar" aria-hidden="true">{user.name?.charAt(0)?.toUpperCase() || "A"}</div>
+              <div>
+                <p className="eyebrow">Athlete profile</p>
+                <h2>{user.name}</h2>
+                <p>{user.email}{user.phone ? ` / ${user.phone}` : ""}</p>
+              </div>
+            </div>
+            <div className="selected-athlete-stats">
+              <div>
+                <span>Completed runs</span>
+                <strong>{completedAttempts.length}</strong>
+              </div>
+              <div>
+                <span>Latest Blue IQ</span>
+                <strong>{latestBlueIq ?? "--"}{latestBlueIq != null && <small>/240</small>}</strong>
+              </div>
+              <div>
+                <span>Latest activity</span>
+                <strong className="date-stat">{latest ? formatDate(latest.session_date || latest.created_at) : "No runs yet"}</strong>
+              </div>
+            </div>
+          </section>
+
+          <section className="admin-layout profile-workspace">
+            <UploadAnalysisPanel token={token} fixedUser={user} onCompleted={loadProfileActivity} />
+            <section className="user-panel latest-run-panel">
+              <p className="eyebrow">Latest analysis</p>
+              {latest ? (
+                <>
+                  <div className="latest-run-heading">
+                    <div>
+                      <h2>Run {latest.run_number || latest.attempt_number || latest.id}</h2>
+                      <p>{formatDate(latest.session_date || latest.created_at)}</p>
+                    </div>
+                    <ScorePill score={latestBlueIq} />
+                  </div>
+                  <div className="latest-score-row">
+                    <span>Blue IQ</span>
+                    <strong>{latestBlueIq}<small>/240</small></strong>
+                  </div>
+                  <div className="card-actions">
+                    <button type="button" onClick={() => setGraphAttempt(latest)}>View graph</button>
+                    {latestVideo && <a href={latestVideo} target="_blank" rel="noreferrer">View video</a>}
+                    {latestReport && <a href={latestReport} target="_blank" rel="noreferrer">View report</a>}
+                  </div>
+                </>
+              ) : (
+                <p className="empty-copy">No completed analysis yet. Upload the athlete's first run to establish a baseline.</p>
+              )}
+            </section>
+          </section>
+
+          <PersonalBestPanel
+            records={personalBests}
+            title={`${user.name}'s personal bests`}
+            description="Highest completed Blue IQ and pillar results, with the session and run where each record was set."
+          />
+
+          <section className="section-block">
+            <div className="section-heading">
+              <div>
+                <p className="eyebrow">Analysis history</p>
+                <h2>Videos and reports</h2>
+                <p>Open any completed run, PDF report, or detailed score graph for this athlete.</p>
+              </div>
+            </div>
+            <div className="cards-grid">
+              {displayedAttempts.length ? displayedAttempts.map((attempt) => (
+                <AttemptCard
+                  key={attempt.id}
+                  attempt={attempt}
+                  onViewAnalysis={setGraphAttempt}
+                />
+              )) : <EmptyState text="No completed runs for this athlete yet." />}
+            </div>
+            {hasMore && (
+              <div className="load-more-row">
+                <button className="secondary-button" onClick={() => setDisplayCount((count) => count + 4)}>
+                  Load 4 More ({completedAttempts.length - displayCount} remaining)
+                </button>
+              </div>
+            )}
+          </section>
+        </>
+      ) : null}
+      {graphAttempt && (
+        <RunAnalysisGraph
+          api={api}
+          token={token}
+          attempt={graphAttempt}
+          athleteName={user?.name}
+          onClose={() => setGraphAttempt(null)}
+        />
+      )}
+    </main>
+  );
+}
+
 function AdminDashboard() {
   const token = getToken("admin");
   const [users, setUsers] = useState([]);
   const [attempts, setAttempts] = useState([]);
   const [leaderboards, setLeaderboards] = useState({});
+  const [adminView, setAdminView] = useState("upload");
   const [displayCount, setDisplayCount] = useState(4); // Show 4 initially
-  const [selectedClient, setSelectedClient] = useState(""); // Track selected client filter
+  const [clientSearch, setClientSearch] = useState("");
   const [error, setError] = useState("");
-  const [uploadState, setUploadState] = useState("");
   const [graphAttempt, setGraphAttempt] = useState(null);
 
   async function loadData() {
     const [userRows, attemptRows, leaderboardRows] = await Promise.all([
-      api("/admin/users", { token }),
+      api("/admin/users?limit=1000", { token }),
       api("/admin/attempts", { token }),
       api("/admin/leaderboards?limit=50", { token }),
     ]);
@@ -526,86 +870,22 @@ function AdminDashboard() {
 
   useAutoRefresh(loadActivity, Boolean(token));
 
-  async function pollJobStatus(jobId) {
-    const maxAttempts = 120; // Poll for up to 10 minutes (120 * 5 seconds)
-    let attempts = 0;
-    
-    const poll = async () => {
-      try {
-        const status = await api(`/jobs/${jobId}`, { token });
-        
-        if (status.status === "completed") {
-          setUploadState("Analysis complete!");
-          await loadData();
-          return true;
-        } else if (status.status === "failed") {
-          setError(`Analysis failed: ${status.error_message || "Unknown error"}`);
-          setUploadState("");
-          return true;
-        } else {
-          // Still processing
-          const progressText = status.progress > 0 ? ` (${status.progress}%)` : "";
-          setUploadState(`Processing video${progressText}...`);
-          
-          attempts++;
-          if (attempts < maxAttempts) {
-            setTimeout(poll, 5000); // Poll every 5 seconds
-          } else {
-            setUploadState("Analysis is taking longer than expected. Check back later.");
-          }
-          return false;
-        }
-      } catch (err) {
-        setError(`Failed to check job status: ${err.message}`);
-        setUploadState("");
-        return true;
-      }
-    };
-    
-    await poll();
-  }
+  const clients = useMemo(() => users.filter((user) => user.role !== "admin"), [users]);
+  const searchedClients = useMemo(() => {
+    const ranked = clients
+      .map((client) => ({ client, score: clientSearchScore(client, clientSearch) }))
+      .filter(({ score }) => Number.isFinite(score));
 
-  async function submitUpload(event) {
-    event.preventDefault();
-    const formElement = event.currentTarget;
-    setError("");
-    setUploadState("Uploading video...");
-    const form = new FormData(formElement);
-    
-    try {
-      // Submit video for background processing
-      const response = await api("/analyze-premium-overlay/", {
-        method: "POST",
-        token,
-        body: form,
-        isForm: true,
-      });
-      
-      // Response contains job_id for tracking
-      if (response.job_id) {
-        formElement.reset();
-        setUploadState("Video uploaded. Processing started...");
-        // Start polling for job completion
-        await pollJobStatus(response.job_id);
-      } else {
-        // Fallback for old response format (shouldn't happen)
-        formElement.reset();
-        setUploadState("Analysis complete.");
-        await loadData();
-      }
-    } catch (err) {
-      setUploadState("");
-      setError(err.message);
+    if (clientSearch.trim()) {
+      ranked.sort((left, right) => (
+        left.score - right.score
+        || left.client.name.localeCompare(right.client.name)
+      ));
     }
-  }
-
-  // Filter attempts by selected client
-  const filteredAttempts = selectedClient 
-    ? attempts.filter(attempt => attempt.person_id === parseInt(selectedClient))
-    : attempts;
-  
-  const displayedAttempts = filteredAttempts.slice(0, displayCount);
-  const hasMore = displayCount < filteredAttempts.length;
+    return ranked.map(({ client }) => client);
+  }, [clients, clientSearch]);
+  const displayedAttempts = attempts.slice(0, displayCount);
+  const hasMore = displayCount < attempts.length;
 
   return (
     <main className="app-shell">
@@ -619,93 +899,115 @@ function AdminDashboard() {
         }}
       />
       {error && <div className="alert wide">{error}</div>}
-      <section className="admin-layout">
-        <form className="upload-panel" onSubmit={submitUpload}>
-          <p className="eyebrow">New analysis</p>
-          <h2>Upload client video</h2>
-          <label>Select user</label>
-          <select name="user_id" required>
-            <option value="">Choose a client</option>
-            {users.filter((user) => user.role !== "admin").map((user) => (
-              <option key={user.id} value={user.id}>{user.name} - {user.email}</option>
-            ))}
-          </select>
-          <label>Display mode</label>
-          <select name="display_mode" defaultValue="coach">
-            <option value="coach">Coach</option>
-            <option value="athlete">Athlete</option>
-          </select>
-          <label className="checkbox-row">
-            <input type="checkbox" name="report" value="true" defaultChecked />
-            Generate PDF report
-          </label>
-          <label>Video file</label>
-          <input type="file" name="file" accept="video/*" required />
-          <button className="primary-button">Run analysis</button>
-          {uploadState && <p className="status-text">{uploadState}</p>}
-        </form>
-        <section className="user-panel">
-          <div className="section-heading">
-            <h2>Clients</h2>
-            <p>{users.filter((user) => user.role !== "admin").length} client accounts</p>
-          </div>
-          <div className="user-list">
-            {users.filter((user) => user.role !== "admin").map((user) => (
-              <div className="user-row" key={user.id}>
-                <span>{user.name}</span>
-                <small>{user.email}</small>
+      <nav className="admin-view-tabs" aria-label="Admin workspace">
+        <button
+          type="button"
+          className={adminView === "upload" ? "active" : ""}
+          aria-current={adminView === "upload" ? "page" : undefined}
+          onClick={() => setAdminView("upload")}
+        >
+          Upload
+        </button>
+        <button
+          type="button"
+          className={adminView === "leaderboards" ? "active" : ""}
+          aria-current={adminView === "leaderboards" ? "page" : undefined}
+          onClick={() => setAdminView("leaderboards")}
+        >
+          Leaderboards
+        </button>
+        <button
+          type="button"
+          className={adminView === "profiles" ? "active" : ""}
+          aria-current={adminView === "profiles" ? "page" : undefined}
+          onClick={() => setAdminView("profiles")}
+        >
+          Athlete Profiles
+        </button>
+      </nav>
+
+      {adminView === "upload" && (
+        <>
+          <section className="upload-workspace">
+            <UploadAnalysisPanel token={token} clients={clients} onCompleted={loadActivity} />
+          </section>
+
+          <section className="section-block">
+            <div className="section-heading">
+              <div>
+                <p className="eyebrow">Analysis history</p>
+                <h2>Recent attempts</h2>
+                <p>Open recently generated videos, reports, and run graphs across all clients.</p>
               </div>
-            ))}
+            </div>
+            <div className="cards-grid">
+              {displayedAttempts.length ? displayedAttempts.map((attempt) => (
+                <AttemptCard
+                  key={attempt.id}
+                  attempt={attempt}
+                  onViewAnalysis={setGraphAttempt}
+                />
+              )) : <EmptyState text="No attempts have been generated yet." />}
+            </div>
+            {hasMore && (
+              <div className="load-more-row">
+                <button className="secondary-button" onClick={() => setDisplayCount(prev => prev + 4)}>
+                  Load 4 More ({attempts.length - displayCount} remaining)
+                </button>
+              </div>
+            )}
+          </section>
+        </>
+      )}
+
+      {adminView === "leaderboards" && <LeaderboardPanel leaderboards={leaderboards} />}
+
+      {adminView === "profiles" && (
+        <section className="user-panel athlete-directory-panel">
+          <div className="section-heading athlete-directory-heading">
+            <div>
+              <p className="eyebrow">Client directory</p>
+              <h2>Athlete profiles</h2>
+              <p>Search an athlete to review personal bests, run history, videos, and reports.</p>
+            </div>
+            <span className="directory-count">
+              {clients.length} {clients.length === 1 ? "athlete" : "athletes"}
+            </span>
+          </div>
+          <label className="client-search">
+            <span>Search athletes</span>
+            <input
+              type="search"
+              value={clientSearch}
+              onChange={(event) => setClientSearch(event.target.value)}
+              placeholder="Search by name or email"
+              autoComplete="off"
+            />
+          </label>
+          <div className="user-list athlete-directory-list">
+            {searchedClients.map((user) => {
+              const runCount = attempts.filter((attempt) => attempt.person_id === user.id).length;
+              return (
+                <button
+                  type="button"
+                  className="user-row"
+                  key={user.id}
+                  onClick={() => routeTo(`/admin/athletes/${user.id}`)}
+                  aria-label={`Open ${user.name}'s athlete profile`}
+                >
+                  <span>{user.name}</span>
+                  <small>{user.email}</small>
+                  <b>{runCount} {runCount === 1 ? "run" : "runs"}</b>
+                </button>
+              );
+            })}
+            {!clients.length && <EmptyState text="No client accounts yet." />}
+            {clients.length > 0 && !searchedClients.length && (
+              <EmptyState text={`No athletes match "${clientSearch.trim()}".`} />
+            )}
           </div>
         </section>
-      </section>
-      <LeaderboardPanel leaderboards={leaderboards} />
-      <section className="section-block">
-        <div className="section-heading">
-          <div>
-            <h2>Recent attempts</h2>
-            <p>Generated videos and reports across all clients.</p>
-          </div>
-          <div>
-            <label style={{ marginRight: '8px', color: 'var(--muted)', fontSize: '13px' }}>Filter by client:</label>
-            <select 
-              value={selectedClient} 
-              onChange={(e) => {
-                setSelectedClient(e.target.value);
-                setDisplayCount(4); // Reset to 4 when filter changes
-              }}
-              style={{ 
-                padding: '8px 12px', 
-                background: '#091426',
-                border: '1px solid var(--line-soft)',
-                borderRadius: '8px',
-                color: 'var(--text)'
-              }}
-            >
-              <option value="">All clients</option>
-              {users.filter((user) => user.role !== "admin").map((user) => (
-                <option key={user.id} value={user.id}>{user.name}</option>
-              ))}
-            </select>
-          </div>
-        </div>
-        <div className="cards-grid">
-          {displayedAttempts.length ? displayedAttempts.map((attempt) => (
-            <AttemptCard
-              key={attempt.id}
-              attempt={attempt}
-              onViewAnalysis={setGraphAttempt}
-            />
-          )) : <EmptyState text="No attempts have been generated yet." />}
-        </div>
-        {hasMore && (
-          <div style={{ textAlign: 'center', marginTop: '24px' }}>
-            <button className="secondary-button" onClick={() => setDisplayCount(prev => prev + 4)}>
-              Load 4 More ({filteredAttempts.length - displayCount} remaining)
-            </button>
-          </div>
-        )}
-      </section>
+      )}
       {graphAttempt && (
         <RunAnalysisGraph
           api={api}
@@ -726,8 +1028,10 @@ function EmptyState({ text }) {
 function App() {
   const path = useRoute();
   const component = useMemo(() => {
+    const athleteProfileMatch = path.match(/^\/admin\/athletes\/(\d+)$/);
     if (path === "/signup") return <AuthForm type="signup" />;
     if (path === "/admin-login") return <AuthForm type="admin" />;
+    if (athleteProfileMatch) return <AdminAthleteProfile userId={Number(athleteProfileMatch[1])} />;
     if (path === "/admin") return <AdminDashboard />;
     if (path === "/dashboard") return <ClientDashboard />;
     return <AuthForm type="login" />;
