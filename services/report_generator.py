@@ -1,13 +1,9 @@
-import json
 import logging
 import math
 import os
 import re
 from datetime import date, datetime
 from typing import Any, Dict, List, Optional
-
-import httpx
-from dotenv import load_dotenv
 
 from services.personal_bests import compare_current_scores_to_previous
 
@@ -203,6 +199,47 @@ APPROVED_COACHING_CUES = {
     },
 }
 
+APPROVED_PILLAR_ASSESSMENTS = {
+    "pressure": {
+        "emerging": "Pressure management is emerging, with limited consistency in how load is built and released through the turn.",
+        "developing": "Pressure management is developing, with some controlled loading and release but inconsistent timing across the run.",
+        "proficient": "Pressure control is proficient, with generally consistent loading and release through most turns.",
+        "excellent": "Pressure control is excellent, with precise and consistent loading and release across the run.",
+    },
+    "balance": {
+        "emerging": "Balance is emerging, with centered stance and stability remaining inconsistent through the run.",
+        "developing": "Balance is developing, with periods of centered control but uneven stability through transitions.",
+        "proficient": "Balance is proficient, with a generally centered stance and stable movement through most transitions.",
+        "excellent": "Balance is excellent, with a centered stance and consistent stability throughout the run.",
+    },
+    "rotation": {
+        "emerging": "Rotational control is emerging, with upper- and lower-body coordination remaining inconsistent.",
+        "developing": "Rotational control is developing, with some effective separation but inconsistent upper-body discipline.",
+        "proficient": "Rotational control is proficient, with coordinated lower-body turning and generally disciplined upper-body movement.",
+        "excellent": "Rotational control is excellent, with precise upper- and lower-body coordination throughout the run.",
+    },
+    "edging": {
+        "emerging": "Edging is emerging, with ski alignment and edge engagement remaining inconsistent.",
+        "developing": "Edging is developing, with periods of parallel ski control but inconsistent engagement through the turn.",
+        "proficient": "Edging is proficient, with generally parallel ski control and consistent engagement through most turns.",
+        "excellent": "Edging is excellent, with precise ski alignment and consistent engagement throughout the run.",
+    },
+}
+
+APPROVED_OVERALL_ASSESSMENTS = {
+    "emerging": "The result reflects an emerging foundation, with consistency and control requiring focused development.",
+    "developing": "The result reflects developing control, with repeatable movement alongside clear opportunities for greater consistency.",
+    "proficient": "The result reflects proficient control across the run, with targeted refinement needed for greater consistency.",
+    "excellent": "The result reflects excellent control and consistency across the four performance pillars.",
+}
+
+BASELINE_COMPARISON_PATTERN = re.compile(
+    r"\b(?:improved|improving|progressed|recovered)\b"
+    r"|\b(?:increased|decreased)\s+by\b"
+    r"|\bcompared\s+(?:with|to)\b",
+    re.IGNORECASE,
+)
+
 
 def _score_band(score: float) -> str:
     rounded = int(round(float(score or 0)))
@@ -227,6 +264,14 @@ def _score_band_key(score: float) -> str:
 def _approved_cue(pillar: str, score: float) -> str:
     pillar_cues = APPROVED_COACHING_CUES.get(pillar, {})
     return pillar_cues.get(_score_band_key(score)) or PILLAR_GUIDANCE.get(pillar, "")
+
+
+def _approved_assessment(pillar: str, score: float) -> str:
+    pillar_assessments = APPROVED_PILLAR_ASSESSMENTS.get(pillar, {})
+    return (
+        pillar_assessments.get(_score_band_key(score))
+        or PILLAR_GUIDANCE.get(pillar, "")
+    )
 
 
 def _approved_improvement_areas(scores: Dict[str, Any], limit: int = 3) -> List[str]:
@@ -277,7 +322,7 @@ def _level_context_sentence(payload: Dict[str, Any]) -> str:
     level = payload.get("blueiq_level") or _report_level_context(payload["final_scores"]["blue_iq"])
     return (
         f"Blue IQ places this skier at {level['category']} Level {level['level']}: "
-        f"{level['name']}. {level['score_interpretation']}"
+        f"{level['name']}."
     )
 
 
@@ -573,23 +618,104 @@ def _clean_sections(sections: Dict[str, Any]) -> Dict[str, Any]:
     return sections
 
 
-def _apply_approved_cues(sections: Dict[str, Any], payload: Dict[str, Any]) -> Dict[str, Any]:
+def _report_comparison_status(payload: Dict[str, Any]) -> str:
+    comparison = payload.get("personal_best_comparisons", {}).get("blue_iq", {})
+    return str(comparison.get("status") or "baseline")
+
+
+def _fixed_overall_summary(payload: Dict[str, Any]) -> str:
     scores = payload["final_scores"]
-    pillars = sections.setdefault("pillars", {})
-    for pillar in ("pressure", "balance", "rotation", "edging"):
-        pillar_section = pillars.setdefault(pillar, {})
-        pillar_section["coaching_focus"] = _approved_cue(pillar, scores[pillar])
-    overall = _clean_report_text(sections.get("overall"))
-    level_sentence = _level_context_sentence(payload)
-    if "Level" not in overall and "Blue IQ places" not in overall:
-        sections["overall"] = f"{level_sentence} {overall}".strip()
+    blue_iq = scores["blue_iq"]
+    band_key = _score_band_key(blue_iq)
+    band_label = _score_band(blue_iq)
+    status = _report_comparison_status(payload)
+
+    if status == "baseline":
+        score_context = (
+            f"This first recorded run establishes a Blue IQ baseline of "
+            f"{blue_iq:.0f}/240 in the {band_label} band."
+        )
+    elif status == "new_personal_best":
+        score_context = (
+            f"This run sets a new personal-best Blue IQ of {blue_iq:.0f}/240 "
+            f"in the {band_label} band."
+        )
     else:
-        sections["overall"] = overall
-    sections["improvement_areas"] = [
-        _level_focus_cue(payload),
-        *_approved_improvement_areas(scores),
-    ][:4]
-    return _clean_sections(sections)
+        score_context = (
+            f"This run records a Blue IQ of {blue_iq:.0f}/240 in the "
+            f"{band_label} band."
+        )
+
+    ranked = sorted(
+        (
+            ("pressure", scores["pressure"]),
+            ("balance", scores["balance"]),
+            ("rotation", scores["rotation"]),
+            ("edging", scores["edging"]),
+        ),
+        key=lambda item: item[1],
+        reverse=True,
+    )
+    strongest_key, strongest_score = ranked[0]
+    weakest_key, weakest_score = ranked[-1]
+    if strongest_score == weakest_score:
+        pillar_context = (
+            f"All four pillars recorded {strongest_score:.0f}/240 in this run."
+        )
+    else:
+        pillar_context = (
+            f"{strongest_key.title()} is the highest pillar at "
+            f"{strongest_score:.0f}/240, while {weakest_key.title()} at "
+            f"{weakest_score:.0f}/240 is the main development priority."
+        )
+
+    return " ".join((
+        score_context,
+        _level_context_sentence(payload),
+        APPROVED_OVERALL_ASSESSMENTS[band_key],
+        pillar_context,
+    ))
+
+
+def _validate_fixed_sections(sections: Dict[str, Any], payload: Dict[str, Any]) -> None:
+    scores = payload["final_scores"]
+    for pillar in ("pressure", "balance", "rotation", "edging"):
+        expected = _approved_assessment(pillar, scores[pillar])
+        actual = sections["pillars"][pillar]["summary"]
+        if actual != expected:
+            raise ValueError(f"{pillar.title()} narrative does not match its score band")
+
+    if _report_comparison_status(payload) == "baseline":
+        narrative = " ".join([
+            sections["overall"],
+            *(
+                sections["pillars"][pillar]["summary"]
+                for pillar in ("pressure", "balance", "rotation", "edging")
+            ),
+        ])
+        if BASELINE_COMPARISON_PATTERN.search(narrative):
+            raise ValueError("Baseline report contains unsupported progress language")
+
+
+def _build_fixed_sections(payload: Dict[str, Any]) -> Dict[str, Any]:
+    scores = payload["final_scores"]
+    sections = {
+        "overall": _fixed_overall_summary(payload),
+        "pillars": {
+            pillar: {
+                "summary": _approved_assessment(pillar, scores[pillar]),
+                "coaching_focus": _approved_cue(pillar, scores[pillar]),
+            }
+            for pillar in ("pressure", "balance", "rotation", "edging")
+        },
+        "improvement_areas": [
+            _level_focus_cue(payload),
+            *_approved_improvement_areas(scores),
+        ][:4],
+    }
+    sections = _clean_sections(sections)
+    _validate_fixed_sections(sections, payload)
+    return sections
 
 
 def _run_segment_label(index: int, total: int) -> str:
@@ -617,129 +743,6 @@ def _build_prompt_segments(score_windows: List[Dict[str, Any]]) -> List[Dict[str
             segment["coaching_factors"][key] = _round_score(value)
         segments.append(segment)
     return segments
-
-
-def _fallback_sections(payload: Dict[str, Any]) -> Dict[str, Any]:
-    scores = payload["final_scores"]
-    ranked = sorted(
-        (
-            ("pressure", scores["pressure"]),
-            ("balance", scores["balance"]),
-            ("rotation", scores["rotation"]),
-            ("edging", scores["edging"]),
-        ),
-        key=lambda item: item[1],
-        reverse=True,
-    )
-    strongest_key, strongest_score = ranked[0]
-    weakest_key, weakest_score = ranked[-1]
-    strongest = strongest_key.title()
-    weakest = weakest_key.title()
-
-    pillars = {}
-    for key in ("pressure", "balance", "rotation", "edging"):
-        label = key.title()
-        score = scores[key]
-        pillars[key] = {
-            "summary": f"{label} scored {score:.0f}/240, placing it in the {_score_band(score).lower()} range.",
-            "coaching_focus": _approved_cue(key, score),
-        }
-
-    return _apply_approved_cues({
-        "overall": (
-            f"{_level_context_sentence(payload)} "
-            f"The skier finished with a Blue IQ of {scores['blue_iq']:.0f}/240, "
-            f"which is currently {_score_band(scores['blue_iq']).lower()} on the score band scale. "
-            f"The strongest pillar was {strongest} at {strongest_score:.0f}/240, while "
-            f"{weakest} needs the most attention at {weakest_score:.0f}/240."
-        ),
-        "pillars": pillars,
-        "improvement_areas": _approved_improvement_areas(scores),
-    }, payload)
-
-
-def _parse_json_content(content: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-    try:
-        parsed = json.loads(content)
-    except Exception:
-        logger.warning("OpenAI report response was not valid JSON; using fallback sections")
-        return _fallback_sections(payload)
-
-    fallback = _fallback_sections(payload)
-    pillars = parsed.get("pillars") if isinstance(parsed.get("pillars"), dict) else {}
-    for key in ("pressure", "balance", "rotation", "edging"):
-        if not isinstance(pillars.get(key), dict):
-            pillars[key] = fallback["pillars"][key]
-        pillars[key].setdefault("summary", fallback["pillars"][key]["summary"])
-        pillars[key].setdefault("coaching_focus", fallback["pillars"][key]["coaching_focus"])
-
-    improvements = parsed.get("improvement_areas")
-    if not isinstance(improvements, list) or not improvements:
-        improvements = fallback["improvement_areas"]
-
-    return _apply_approved_cues({
-        "overall": _coerce_text(parsed.get("overall"), fallback["overall"]),
-        "pillars": pillars,
-        "improvement_areas": [_coerce_text(item) for item in improvements[:4]],
-    }, payload)
-
-
-def _generate_openai_sections(payload: Dict[str, Any], use_openai: bool = True) -> Dict[str, Any]:
-    if not use_openai:
-        return _fallback_sections(payload)
-
-    load_dotenv()
-    api_key = os.getenv("OPENAI_API_KEY") or os.getenv("OPENAI_API")
-    if not api_key:
-        return _fallback_sections(payload)
-
-    prompt = (
-        "Create a serious, professional one-page ski coaching report from the JSON data. "
-        "Return only valid JSON with keys: overall, pillars, improvement_areas. "
-        "overall must be a single string, not an object. improvement_areas must be an array of strings. "
-        "pillars must contain pressure, balance, rotation, edging. Each pillar must contain "
-        "summary and coaching_focus as strings. Use final scores and run segment data. "
-        "Use approved_blueiq_level as the official source for the skier's current level, status, "
-        "score meaning, and next focus. "
-        "Do not invent coaching advice. coaching_focus will be replaced by approved Bluerun cues. "
-        "Use coaching_focus only as a brief observation, not a technical instruction. "
-        "Use integer scores only. Never write decimals. "
-        "Do not use the words window, windows, segment, segments, bucket, or timeframe. "
-        "Use human phrases like first part of the run, middle of the run, or later in the run. "
-        "Each pillar summary must be one short sentence. Each coaching_focus must be one short sentence. "
-        "Mention strengths, but do not over-praise. Clearly guide what needs improvement. "
-        "Do not use raw measurement variable names such as ski_angle, hip_angle, bend_angle, "
-        "lateral movement, or pixels. Use coaching language instead: ski parallel control, "
-        "edge control, upper-body alignment, knee flexion, athletic stance, and transition control. "
-        "Keep each paragraph concise so it fits a one-page PDF.\n\n"
-        f"Report data:\n{json.dumps(payload, indent=2)}"
-    )
-
-    try:
-        response = httpx.post(
-            "https://api.openai.com/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
-                "messages": [
-                    {"role": "system", "content": "You write ski coaching reports for instructors and athletes."},
-                    {"role": "user", "content": prompt},
-                ],
-                "temperature": 0.35,
-                "max_tokens": 900,
-                "response_format": {"type": "json_object"},
-            },
-            timeout=45,
-        )
-        response.raise_for_status()
-        content = response.json()["choices"][0]["message"]["content"].strip()
-        return _parse_json_content(content, payload)
-    except Exception as exc:
-        logger.error(f"OpenAI PDF report generation failed, using fallback sections: {exc}")
-        return _fallback_sections(payload)
 
 
 def _draw_header(canvas: Image.Image, draw, fonts: Dict[str, Any], logo_path: str, payload: Dict[str, Any]) -> None:
@@ -993,7 +996,11 @@ def generate_basic_report(
     use_openai: bool = True,
     context: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """Generate a one-page styled PDF ski report and return report metadata."""
+    """Generate a one-page styled PDF from fixed, score-band report copy.
+
+    ``use_openai`` is retained for API compatibility. Report narratives are
+    deterministic and no longer sent to or generated by an external model.
+    """
     final_scores = {
         "blue_iq": _ceil_score(
             (
@@ -1036,7 +1043,7 @@ def generate_basic_report(
         run_number=int((context or {}).get("attempt_number") or 0),
     )
 
-    sections = _generate_openai_sections(payload, use_openai=use_openai)
+    sections = _build_fixed_sections(payload)
     output_path = result["output_path"]
     report_path = os.path.splitext(output_path)[0] + "_report.pdf"
     _draw_pdf_report(report_path, payload, sections)
