@@ -79,6 +79,8 @@ def ensure_database_schema():
         "ALTER TABLE video_analysis ADD COLUMN IF NOT EXISTS s3_video_key VARCHAR(500)",
         "ALTER TABLE video_analysis ADD COLUMN IF NOT EXISTS s3_report_key VARCHAR(500)",
         "ALTER TABLE video_analysis ADD COLUMN IF NOT EXISTS s3_snapshot_key VARCHAR(500)",
+        "ALTER TABLE video_analysis ADD COLUMN IF NOT EXISTS is_archived BOOLEAN DEFAULT FALSE",
+        "UPDATE video_analysis SET is_archived = FALSE WHERE is_archived IS NULL",
         "UPDATE persons SET role = 'client' WHERE role IS NULL",
         "UPDATE persons SET is_active = TRUE WHERE is_active IS NULL",
     ]

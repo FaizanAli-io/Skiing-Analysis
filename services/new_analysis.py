@@ -7,7 +7,7 @@ import logging
 import os
 import time
 from datetime import date
-from typing import Dict, Any, Optional, Tuple, List
+from typing import Dict, Any, Optional, Tuple, List, Callable
 
 # Suppress verbose analysis messages. A dedicated logger below emits only the
 # requested per-frame Pressure and Rotation details.
@@ -284,11 +284,11 @@ def analyze_video(
     session_date: Optional[str] = None,
     session_number: Optional[int] = None,
     previous_personal_bests: Optional[Dict[str, Any]] = None,
+    progress_callback: Optional[Callable[[int], None]] = None,
 ) -> Dict[str, Any]:
     """Analyze ski video and return performance metrics"""
     _reset_frame_metrics_log()
     logger.info(f"Starting video analysis for: {video_path}")
-    display_mode = display_mode.lower().strip()
     if display_mode not in {"coach", "athlete"}:
         logger.warning(f"Unknown display mode '{display_mode}', falling back to coach mode")
         display_mode = "coach"
@@ -471,6 +471,7 @@ def analyze_video(
         snapshot_saved = False
         snapshot_frame_target = max(1, int((total_frames / frame_skip) * 0.5))
         last_report_frame = None
+        last_emitted_pct = 10
 
         # Detect one stable orientation before any analysis. Candidate rotations
         # are scored over several frames by their positive head-to-toe Y gap.
@@ -601,6 +602,17 @@ def analyze_video(
 
                 if processed_frames % 50 == 0:
                     logger.info(f"Processed {processed_frames} frames...")
+
+                if progress_callback and total_frames > 0:
+                    # Scale video analysis work from 10% to 65%
+                    expected_processed = max(1, total_frames // frame_skip)
+                    pct = min(65, 10 + int(55 * (processed_frames / expected_processed)))
+                    if pct > last_emitted_pct:
+                        last_emitted_pct = pct
+                        try:
+                            progress_callback(pct)
+                        except Exception:
+                            pass
 
                 if detected_people:
                     # Sort to pick the most relevant person (e.g., tallest one)

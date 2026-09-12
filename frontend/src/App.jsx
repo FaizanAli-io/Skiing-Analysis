@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import TrendsChart from "./TrendsChart";
 import RunAnalysisGraph from "./RunAnalysisGraph";
+import logoImg from "../../services/bluerun.png";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
 const DASHBOARD_REFRESH_MS = 5000;
@@ -102,13 +103,7 @@ function useAutoRefresh(refresh, enabled = true) {
 function Logo() {
   return (
     <div className="brand">
-      <svg className="brand-mark" viewBox="0 0 36 36" aria-hidden="true">
-        <polygon points="16,2 25,2 15,12 6,12" />
-        <polygon points="6,12 15,12 7,20 0,14" opacity="0.68" />
-        <polygon points="10,20 19,20 30,31 20,31" />
-        <polygon points="20,31 30,31 20,36 10,36" opacity="0.68" />
-      </svg>
-      <span>bluerun</span>
+      <img src={logoImg} alt="bluerun" className="brand-logo-img" />
     </div>
   );
 }
@@ -172,10 +167,18 @@ function fileUrl(value) {
 
 function scoreBand(score) {
   const value = Number(score || 0);
-  if (value >= 200) return ["Excellent", "excellent"];
-  if (value >= 170) return ["Proficient", "proficient"];
-  if (value >= 130) return ["Developing", "developing"];
-  return ["Emerging", "emerging"];
+  if (value >= 225) return ["Mastering 3", "mastering"];
+  if (value >= 210) return ["Mastering 2", "mastering"];
+  if (value >= 195) return ["Mastering 1", "mastering"];
+  if (value >= 180) return ["Advancing 3", "advancing"];
+  if (value >= 165) return ["Advancing 2", "advancing"];
+  if (value >= 150) return ["Advancing 1", "advancing"];
+  if (value >= 135) return ["Progressing 3", "progressing"];
+  if (value >= 120) return ["Progressing 2", "progressing"];
+  if (value >= 105) return ["Progressing 1", "progressing"];
+  if (value >= 90) return ["Building 3", "building"];
+  if (value >= 75) return ["Building 2", "building"];
+  return ["Building 1", "building"];
 }
 
 function formatDate(value) {
@@ -403,7 +406,7 @@ function LeaderboardPanel({ leaderboards }) {
   );
 }
 
-function AttemptCard({ attempt, onViewAnalysis }) {
+function AttemptCard({ attempt, onViewAnalysis, onArchive, onRestore, onDelete }) {
   const blueIq = Math.ceil(
     Number(attempt.blue_iq_score || (Number(attempt.pressure_score || 0) + Number(attempt.balance_score || 0) + Number(attempt.rotation_score || 0) + Number(attempt.edging_score || 0)) / 4)
   );
@@ -415,7 +418,7 @@ function AttemptCard({ attempt, onViewAnalysis }) {
   const sessionLabel = attempt.session_number ? `Session ${attempt.session_number}` : "Session";
   const dateLabel = formatDate(attempt.session_date || attempt.created_at || attempt.timestamp);
   return (
-    <article className="attempt-card">
+    <article className={`attempt-card ${attempt.is_archived ? "is-archived" : ""}`}>
       <div className="attempt-top">
         <div>
           <p className="eyebrow">{sessionLabel} / Run {runNumber}</p>
@@ -423,6 +426,7 @@ function AttemptCard({ attempt, onViewAnalysis }) {
           <p className="attempt-date">{dateLabel}</p>
         </div>
         <div className="attempt-badges">
+          {attempt.is_archived && <span className="filter-chip" style={{ color: '#f59e0b', borderColor: '#f59e0b', background: 'rgba(245,158,11,0.1)' }}>Archived</span>}
           {newPersonalBests.has("blue_iq") && <span className="new-pb-badge">New personal best</span>}
           <ScorePill score={blueIq} />
         </div>
@@ -447,6 +451,21 @@ function AttemptCard({ attempt, onViewAnalysis }) {
         )}
         {video && <a href={video} target="_blank" rel="noreferrer">View video</a>}
         {report && <a href={report} target="_blank" rel="noreferrer">View report</a>}
+        {onRestore && attempt.is_archived && (
+          <button type="button" className="action-restore" onClick={() => onRestore(attempt)}>
+            Restore
+          </button>
+        )}
+        {onArchive && !attempt.is_archived && (
+          <button type="button" className="action-archive" onClick={() => onArchive(attempt)}>
+            Archive
+          </button>
+        )}
+        {onDelete && (
+          <button type="button" className="action-delete" onClick={() => onDelete(attempt)}>
+            Delete
+          </button>
+        )}
       </div>
     </article>
   );
@@ -454,15 +473,61 @@ function AttemptCard({ attempt, onViewAnalysis }) {
 
 function UploadAnalysisPanel({ token, clients = [], fixedUser = null, onCompleted }) {
   const [uploadState, setUploadState] = useState("");
+  const [uploadProgress, setUploadProgress] = useState(0); // 0-100
+  const [progressPhase, setProgressPhase] = useState(""); // 'uploading' | 'processing' | ''
   const [uploadError, setUploadError] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
 
+  function uploadWithProgress(url, formData) {
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open("POST", url);
+      if (token) {
+        xhr.setRequestHeader("Authorization", `Bearer ${token}`);
+      }
+
+      xhr.upload.onprogress = (event) => {
+        if (event.lengthComputable) {
+          const percent = Math.round((event.loaded / event.total) * 100);
+          setUploadProgress(percent);
+          setUploadState(`Uploading video file (${percent}%)...`);
+        }
+      };
+
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          try {
+            const data = JSON.parse(xhr.responseText);
+            resolve(data);
+          } catch {
+            resolve(xhr.responseText);
+          }
+        } else {
+          try {
+            const errData = JSON.parse(xhr.responseText);
+            const msg = errData.detail || "Upload failed";
+            reject(new Error(Array.isArray(msg) ? msg.map(m => m.msg || m).join(", ") : msg));
+          } catch {
+            reject(new Error(xhr.responseText || `Upload failed with status ${xhr.status}`));
+          }
+        }
+      };
+
+      xhr.onerror = () => reject(new Error("Network error during upload. Please check your connection."));
+      xhr.ontimeout = () => reject(new Error("Upload timed out. Please retry."));
+      xhr.send(formData);
+    });
+  }
+
   async function waitForJob(jobId) {
+    setProgressPhase("processing");
     for (let pollCount = 0; pollCount < 120; pollCount += 1) {
       const status = await api(`/jobs/${jobId}`, { token });
 
       if (status.status === "completed") {
+        setUploadProgress(100);
         setUploadState("Analysis complete!");
+        setProgressPhase("");
         if (onCompleted) await onCompleted();
         return;
       }
@@ -470,39 +535,46 @@ function UploadAnalysisPanel({ token, clients = [], fixedUser = null, onComplete
         throw new Error(`Analysis failed: ${status.error_message || "Unknown error"}`);
       }
 
-      const progressText = status.progress > 0 ? ` (${status.progress}%)` : "";
-      setUploadState(`Processing video${progressText}...`);
-      await new Promise((resolve) => window.setTimeout(resolve, 5000));
+      const p = status.progress || 0;
+      setUploadProgress(p);
+      setUploadState(`Processing video frames (${p}%)...`);
+      await new Promise((resolve) => window.setTimeout(resolve, 3000));
     }
 
     setUploadState("Analysis is taking longer than expected. Check back later.");
+    setProgressPhase("");
   }
 
   async function submitUpload(event) {
     event.preventDefault();
     const formElement = event.currentTarget;
     setUploadError("");
-    setUploadState("Uploading video...");
+    setUploadState("Initiating upload...");
+    setUploadProgress(0);
+    setProgressPhase("uploading");
     setIsSubmitting(true);
 
     try {
-      const response = await api("/analyze-premium-overlay/", {
-        method: "POST",
-        token,
-        body: new FormData(formElement),
-        isForm: true,
-      });
+      const response = await uploadWithProgress(
+        `${API_BASE}/api/analyze-premium-overlay/`,
+        new FormData(formElement)
+      );
 
       formElement.reset();
       if (response.job_id) {
-        setUploadState("Video uploaded. Processing started...");
+        setUploadState("Video uploaded. Starting AI analysis...");
+        setUploadProgress(10);
         await waitForJob(response.job_id);
       } else {
         setUploadState("Analysis complete.");
+        setUploadProgress(100);
+        setProgressPhase("");
         if (onCompleted) await onCompleted();
       }
     } catch (err) {
       setUploadState("");
+      setUploadProgress(0);
+      setProgressPhase("");
       setUploadError(err.message);
     } finally {
       setIsSubmitting(false);
@@ -524,7 +596,7 @@ function UploadAnalysisPanel({ token, clients = [], fixedUser = null, onComplete
       ) : (
         <>
           <label>Select user</label>
-          <select name="user_id" required>
+          <select name="user_id" required disabled={isSubmitting}>
             <option value="">Choose a client</option>
             {clients.map((user) => (
               <option key={user.id} value={user.id}>{user.name} - {user.email}</option>
@@ -533,19 +605,36 @@ function UploadAnalysisPanel({ token, clients = [], fixedUser = null, onComplete
         </>
       )}
       <label>Display mode</label>
-      <select name="display_mode" defaultValue="coach">
+      <select name="display_mode" defaultValue="coach" disabled={isSubmitting}>
         <option value="coach">Coach</option>
         <option value="athlete">Athlete</option>
       </select>
       <label className="checkbox-row">
-        <input type="checkbox" name="report" value="true" defaultChecked />
+        <input type="checkbox" name="report" value="true" defaultChecked disabled={isSubmitting} />
         Generate PDF report
       </label>
       <label>Video file</label>
-      <input type="file" name="file" accept="video/*" required />
+      <input type="file" name="file" accept="video/*" required disabled={isSubmitting} />
       <button className="primary-button" disabled={isSubmitting}>
-        {isSubmitting ? "Processing..." : "Run analysis"}
+        {isSubmitting
+          ? progressPhase === "uploading"
+            ? `Uploading (${uploadProgress}%)...`
+            : `Processing (${uploadProgress}%)...`
+          : "Run analysis"}
       </button>
+
+      {isSubmitting && uploadProgress > 0 && (
+        <div className="upload-progress-container">
+          <div className="upload-progress-track">
+            <div className="upload-progress-fill" style={{ width: `${uploadProgress}%` }} />
+          </div>
+          <div className="upload-progress-meta">
+            <span>{progressPhase === "uploading" ? "File transfer" : "AI video analysis"}</span>
+            <span>{uploadProgress}%</span>
+          </div>
+        </div>
+      )}
+
       {uploadError && <div className="alert">{uploadError}</div>}
       {uploadState && <p className="status-text">{uploadState}</p>}
     </form>
@@ -555,7 +644,7 @@ function UploadAnalysisPanel({ token, clients = [], fixedUser = null, onComplete
 function ClientDashboard() {
   const token = getToken("client");
   const [attempts, setAttempts] = useState([]);
-  const [displayCount, setDisplayCount] = useState(4); // Show 4 initially
+  const [displayCount, setDisplayCount] = useState(12); // Show 12 initially to fill widescreen area
   const [user, setUser] = useState(null);
   const [personalBests, setPersonalBests] = useState({});
   const [error, setError] = useState("");
@@ -648,18 +737,50 @@ function AdminAthleteProfile({ userId }) {
   const [user, setUser] = useState(null);
   const [attempts, setAttempts] = useState([]);
   const [personalBests, setPersonalBests] = useState({});
-  const [displayCount, setDisplayCount] = useState(4);
+  const [displayCount, setDisplayCount] = useState(12);
   const [graphAttempt, setGraphAttempt] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
   async function loadProfileActivity() {
     const [attemptRows, bestRows] = await Promise.all([
-      api(`/admin/users/${userId}/attempts?limit=100`, { token }),
+      api(`/admin/users/${userId}/attempts?limit=100&include_archived=true`, { token }),
       api(`/admin/users/${userId}/personal-bests`, { token }),
     ]);
     setAttempts(attemptRows);
     setPersonalBests(bestRows.personal_bests || {});
+  }
+
+  async function handleArchive(attempt) {
+    try {
+      await api(`/admin/attempts/${attempt.id}/archive`, { method: "POST", token });
+      await loadProfileActivity();
+    } catch (err) {
+      alert(`Failed to archive attempt: ${err.message}`);
+    }
+  }
+
+  async function handleRestore(attempt) {
+    try {
+      await api(`/admin/attempts/${attempt.id}/restore`, { method: "POST", token });
+      await loadProfileActivity();
+    } catch (err) {
+      alert(`Failed to restore attempt: ${err.message}`);
+    }
+  }
+
+  async function handleDelete(attempt) {
+    const confirmed = window.confirm(
+      `Are you sure you want to permanently delete Run ${attempt.run_number || attempt.attempt_number || attempt.id}?\n\nThis will permanently delete the video, report, and metrics. This action cannot be undone.`
+    );
+    if (!confirmed) return;
+
+    try {
+      await api(`/admin/attempts/${attempt.id}`, { method: "DELETE", token });
+      await loadProfileActivity();
+    } catch (err) {
+      alert(`Failed to delete attempt: ${err.message}`);
+    }
   }
 
   useEffect(() => {
@@ -672,7 +793,7 @@ function AdminAthleteProfile({ userId }) {
     setLoading(true);
     Promise.all([
       api(`/admin/users/${userId}`, { token }),
-      api(`/admin/users/${userId}/attempts?limit=100`, { token }),
+      api(`/admin/users/${userId}/attempts?limit=100&include_archived=true`, { token }),
       api(`/admin/users/${userId}/personal-bests`, { token }),
     ])
       .then(([profile, attemptRows, bestRows]) => {
@@ -803,6 +924,9 @@ function AdminAthleteProfile({ userId }) {
                   key={attempt.id}
                   attempt={attempt}
                   onViewAnalysis={setGraphAttempt}
+                  onArchive={handleArchive}
+                  onRestore={handleRestore}
+                  onDelete={handleDelete}
                 />
               )) : <EmptyState text="No completed runs for this athlete yet." />}
             </div>
@@ -833,31 +957,76 @@ function AdminDashboard() {
   const token = getToken("admin");
   const [users, setUsers] = useState([]);
   const [attempts, setAttempts] = useState([]);
+  const [attemptsLoading, setAttemptsLoading] = useState(false);
   const [leaderboards, setLeaderboards] = useState({});
   const [adminView, setAdminView] = useState("upload");
-  const [displayCount, setDisplayCount] = useState(4); // Show 4 initially
+  const [displayCount, setDisplayCount] = useState(12); // Show 12 initially to fill widescreen area
+  const [showArchived, setShowArchived] = useState(false);
   const [clientSearch, setClientSearch] = useState("");
   const [error, setError] = useState("");
   const [graphAttempt, setGraphAttempt] = useState(null);
 
   async function loadData() {
-    const [userRows, attemptRows, leaderboardRows] = await Promise.all([
-      api("/admin/users?limit=1000", { token }),
-      api("/admin/attempts", { token }),
+    setAttemptsLoading(true);
+    try {
+      const attemptsUrl = showArchived
+        ? "/admin/attempts?limit=100&only_archived=true"
+        : "/admin/attempts?limit=100";
+      const [userRows, attemptRows, leaderboardRows] = await Promise.all([
+        api("/admin/users?limit=1000", { token }),
+        api(attemptsUrl, { token }),
+        api("/admin/leaderboards?limit=50", { token }),
+      ]);
+      setUsers(userRows);
+      setAttempts(attemptRows);
+      setLeaderboards(leaderboardRows.leaderboards || {});
+    } finally {
+      setAttemptsLoading(false);
+    }
+  }
+
+  async function loadActivity() {
+    const attemptsUrl = showArchived
+      ? "/admin/attempts?limit=100&only_archived=true"
+      : "/admin/attempts?limit=100";
+    const [attemptRows, leaderboardRows] = await Promise.all([
+      api(attemptsUrl, { token }),
       api("/admin/leaderboards?limit=50", { token }),
     ]);
-    setUsers(userRows);
     setAttempts(attemptRows);
     setLeaderboards(leaderboardRows.leaderboards || {});
   }
 
-  async function loadActivity() {
-    const [attemptRows, leaderboardRows] = await Promise.all([
-      api("/admin/attempts", { token }),
-      api("/admin/leaderboards?limit=50", { token }),
-    ]);
-    setAttempts(attemptRows);
-    setLeaderboards(leaderboardRows.leaderboards || {});
+  async function handleArchive(attempt) {
+    try {
+      await api(`/admin/attempts/${attempt.id}/archive`, { method: "POST", token });
+      await loadActivity();
+    } catch (err) {
+      alert(`Failed to archive attempt: ${err.message}`);
+    }
+  }
+
+  async function handleRestore(attempt) {
+    try {
+      await api(`/admin/attempts/${attempt.id}/restore`, { method: "POST", token });
+      await loadActivity();
+    } catch (err) {
+      alert(`Failed to restore attempt: ${err.message}`);
+    }
+  }
+
+  async function handleDelete(attempt) {
+    const confirmed = window.confirm(
+      `Are you sure you want to permanently delete Run ${attempt.run_number || attempt.attempt_number || attempt.id}?\n\nThis will permanently delete the video, report, and metrics. This action cannot be undone.`
+    );
+    if (!confirmed) return;
+
+    try {
+      await api(`/admin/attempts/${attempt.id}`, { method: "DELETE", token });
+      await loadActivity();
+    } catch (err) {
+      alert(`Failed to delete attempt: ${err.message}`);
+    }
   }
 
   useEffect(() => {
@@ -866,7 +1035,7 @@ function AdminDashboard() {
       return;
     }
     loadData().catch((err) => setError(err.message));
-  }, [token]);
+  }, [token, showArchived]);
 
   useAutoRefresh(loadActivity, Boolean(token));
 
@@ -936,25 +1105,52 @@ function AdminDashboard() {
             <div className="section-heading">
               <div>
                 <p className="eyebrow">Analysis history</p>
-                <h2>Recent attempts</h2>
+                <h2>{showArchived ? "Archived attempts" : "Recent attempts"}</h2>
                 <p>Open recently generated videos, reports, and run graphs across all clients.</p>
+                <div className="filter-toggle-row">
+                  <button
+                    type="button"
+                    className={`filter-chip ${!showArchived ? "active" : ""}`}
+                    onClick={() => { setShowArchived(false); setDisplayCount(12); }}
+                  >
+                    Active runs
+                  </button>
+                  <button
+                    type="button"
+                    className={`filter-chip ${showArchived ? "active" : ""}`}
+                    onClick={() => { setShowArchived(true); setDisplayCount(12); }}
+                  >
+                    Archived runs
+                  </button>
+                </div>
               </div>
             </div>
-            <div className="cards-grid">
-              {displayedAttempts.length ? displayedAttempts.map((attempt) => (
-                <AttemptCard
-                  key={attempt.id}
-                  attempt={attempt}
-                  onViewAnalysis={setGraphAttempt}
-                />
-              )) : <EmptyState text="No attempts have been generated yet." />}
-            </div>
-            {hasMore && (
-              <div className="load-more-row">
-                <button className="secondary-button" onClick={() => setDisplayCount(prev => prev + 4)}>
-                  Load 4 More ({attempts.length - displayCount} remaining)
-                </button>
+            {attemptsLoading ? (
+              <div className="empty-state" style={{ padding: '48px 0', color: 'var(--blue)' }}>
+                Loading {showArchived ? "archived" : "active"} attempts...
               </div>
+            ) : (
+              <>
+                <div className="cards-grid">
+                  {displayedAttempts.length ? displayedAttempts.map((attempt) => (
+                    <AttemptCard
+                      key={attempt.id}
+                      attempt={attempt}
+                      onViewAnalysis={setGraphAttempt}
+                      onArchive={handleArchive}
+                      onRestore={handleRestore}
+                      onDelete={handleDelete}
+                    />
+                  )) : <EmptyState text={showArchived ? "No archived attempts." : "No attempts have been generated yet."} />}
+                </div>
+                {hasMore && (
+                  <div className="load-more-row">
+                    <button className="secondary-button" onClick={() => setDisplayCount(prev => prev + 8)}>
+                      Load 8 More ({attempts.length - displayCount} remaining)
+                    </button>
+                  </div>
+                )}
+              </>
             )}
           </section>
         </>

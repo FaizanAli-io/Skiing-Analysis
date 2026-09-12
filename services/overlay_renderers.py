@@ -18,23 +18,27 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 MAX_BLUE_SCORE = 240
-LEVEL_COUNT = 9
+LEVEL_COUNT = 12
 SCORE_BANDS = (
-    {"key": "emerging", "label": "Emerging", "min": 60, "max": 129},
-    {"key": "developing", "label": "Developing", "min": 130, "max": 169},
-    {"key": "proficient", "label": "Proficient", "min": 170, "max": 199},
-    {"key": "excellent", "label": "Excellent", "min": 200, "max": 240},
+    {"key": "building", "label": "Building", "min": 60, "max": 104, "color_rgb": (249, 115, 22)},
+    {"key": "progressing", "label": "Progressing", "min": 105, "max": 149, "color_rgb": (56, 189, 248)},
+    {"key": "advancing", "label": "Advancing", "min": 150, "max": 194, "color_rgb": (106, 175, 255)},
+    {"key": "mastering", "label": "Mastering", "min": 195, "max": 240, "color_rgb": (34, 197, 94)},
 )
+# 12 Sub-levels: 4 stages x 3 sub-levels (15 points per step across 60-240)
 BLUE_IQ_LEVELS = (
-    {"level": 1, "label": "Beginner \u2022 Level 1", "min": 60, "max": 80},
-    {"level": 2, "label": "Beginner \u2022 Level 2", "min": 81, "max": 100},
-    {"level": 3, "label": "Intermediate \u2022 Level 3", "min": 101, "max": 120},
-    {"level": 4, "label": "Intermediate \u2022 Level 4", "min": 121, "max": 140},
-    {"level": 5, "label": "Intermediate \u2022 Level 5", "min": 141, "max": 160},
-    {"level": 6, "label": "Intermediate \u2022 Level 6", "min": 161, "max": 180},
-    {"level": 7, "label": "Intermediate \u2022 Level 7", "min": 181, "max": 200},
-    {"level": 8, "label": "Expert \u2022 Level 8", "min": 201, "max": 220},
-    {"level": 9, "label": "Expert \u2022 Level 9", "min": 221, "max": 240},
+    {"level": 1, "stage": "Building", "sub_level": 1, "label": "Building 1", "stage_key": "building", "min": 60, "max": 74},
+    {"level": 2, "stage": "Building", "sub_level": 2, "label": "Building 2", "stage_key": "building", "min": 75, "max": 89},
+    {"level": 3, "stage": "Building", "sub_level": 3, "label": "Building 3", "stage_key": "building", "min": 90, "max": 104},
+    {"level": 4, "stage": "Progressing", "sub_level": 1, "label": "Progressing 1", "stage_key": "progressing", "min": 105, "max": 119},
+    {"level": 5, "stage": "Progressing", "sub_level": 2, "label": "Progressing 2", "stage_key": "progressing", "min": 120, "max": 134},
+    {"level": 6, "stage": "Progressing", "sub_level": 3, "label": "Progressing 3", "stage_key": "progressing", "min": 135, "max": 149},
+    {"level": 7, "stage": "Advancing", "sub_level": 1, "label": "Advancing 1", "stage_key": "advancing", "min": 150, "max": 164},
+    {"level": 8, "stage": "Advancing", "sub_level": 2, "label": "Advancing 2", "stage_key": "advancing", "min": 165, "max": 179},
+    {"level": 9, "stage": "Advancing", "sub_level": 3, "label": "Advancing 3", "stage_key": "advancing", "min": 180, "max": 194},
+    {"level": 10, "stage": "Mastering", "sub_level": 1, "label": "Mastering 1", "stage_key": "mastering", "min": 195, "max": 209},
+    {"level": 11, "stage": "Mastering", "sub_level": 2, "label": "Mastering 2", "stage_key": "mastering", "min": 210, "max": 224},
+    {"level": 12, "stage": "Mastering", "sub_level": 3, "label": "Mastering 3", "stage_key": "mastering", "min": 225, "max": 240},
 )
 
 
@@ -52,13 +56,20 @@ def draw_logo_placeholder(overlay, x, y, w, h, border_color, text_color):
 
 def _score_tier(score):
     band = _score_band(score)
-    color_map = {
-        "emerging": (74, 96, 214),
-        "developing": (42, 157, 244),
-        "proficient": (108, 166, 32),
-        "excellent": (42, 42, 42),
+    level_info = _blueiq_level_info(score)
+    # BGR for OpenCV
+    color_map_bgr = {
+        "building": (22, 115, 249),     # Orange in BGR
+        "progressing": (248, 189, 56),   # Sky blue in BGR
+        "advancing": (255, 175, 106),    # Blue in BGR
+        "mastering": (94, 197, 34),      # Green in BGR
+        # backward compatibility aliases
+        "emerging": (22, 115, 249),
+        "developing": (248, 189, 56),
+        "proficient": (255, 175, 106),
+        "excellent": (94, 197, 34),
     }
-    return band["label"], color_map[band["key"]]
+    return level_info["label"], color_map_bgr.get(band["key"], (255, 255, 255))
 
 
 def _score_band(score):
@@ -742,6 +753,7 @@ def create_premium_overlay(
         "faint":       (130, 144, 166),
         "track":       (43,  53,  74),
         "blue":        (106, 175, 255),
+        "sky_blue":    (56,  189, 248),
         "green":       (34,  197,  94),
         "orange":      (249, 115,  22),
         "amber":       (245, 158,  11),
@@ -794,7 +806,7 @@ def create_premium_overlay(
 
     # Fixed column anchors for metric rows
     LABEL_X        = panel_x + 16
-    TAG_W          = 88
+    TAG_W          = 96
     TAG_H          = 22
     TAG_X          = panel_x + panel_w - TAG_W - 10
     SCORE_RIGHT_X  = TAG_X - 10   # score right-edge
@@ -804,25 +816,33 @@ def create_premium_overlay(
         return _score_band(s)
 
     def _tcolor(s):
+        info = _blueiq_level_info(s)
         return {
-            "excellent": C["blue"],
-            "proficient": C["green"],
-            "developing": C["amber"],
-            "emerging": C["red"],
-        }[_band(s)["key"]]
+            "mastering": C["green"],
+            "advancing": C["blue"],
+            "progressing": C["sky_blue"],
+            "building": C["orange"],
+            # fallback aliases
+            "excellent": C["green"],
+            "proficient": C["blue"],
+            "developing": C["sky_blue"],
+            "emerging": C["orange"],
+        }.get(info.get("stage_key", _band(s)["key"]), C["blue"])
 
     def _tlabel(s):
-        return _band(s)["label"]
+        return _blueiq_level_info(s)["label"]
 
     def _level_number(score):
         return _blueiq_level_info(score)["level"]
 
     def _level_color(level):
-        if level <= 5:
-            return C["amber"]
-        if level <= 7:
-            return C["green"]
-        return C["blue"]
+        if level <= 3:
+            return C["orange"]
+        if level <= 6:
+            return C["sky_blue"]
+        if level <= 9:
+            return C["blue"]
+        return C["green"]
 
     def draw_level_dots(x, y, level, active_color):
         dot_gap = 7
@@ -892,23 +912,25 @@ def create_premium_overlay(
     # ── PERFORMANCE PROFILE ──────────────────────────────────────────────────
     y = section_header(y, "PERFORMANCE PROFILE")
 
+
+
     # Blue IQ card
     IQ_H = 74
     draw.rounded_rectangle((panel_x, y, panel_x+panel_w, y+IQ_H),
                             radius=14, fill=C["card"], outline=C["border"], width=1)
     draw.text((panel_x+16, y+10), "Blue IQ", fill=C["blue"], font=F["iq_label"])
-    level_label = _blueiq_level_label(blue_iq)
-    draw.text((panel_x+16, y+36), level_label, fill=C["muted"], font=F["iq_sublabel"])
+    level_info = _blueiq_level_info(blue_iq)
+    draw.text((panel_x+16, y+36), f"Stage: {level_info['stage']}", fill=C["muted"], font=F["iq_sublabel"])
 
     display_blue_iq = int(round(_clamp_score(blue_iq)))
     score_str = f"{display_blue_iq}"
     sw = draw.textlength(score_str, font=F["iq_score"])
     denom = f"/{MAX_BLUE_SCORE}"
     denom_w = draw.textlength(denom, font=F["score_den"])
-    tier_txt  = _tlabel(display_blue_iq).upper()
+    tier_txt  = level_info["label"].upper()
     tier_col  = _tcolor(display_blue_iq)
 
-    iq_tag_w = max(90, int(draw.textlength(tier_txt, font=F["iq_tier"]) + 22))
+    iq_tag_w = max(100, int(draw.textlength(tier_txt, font=F["iq_tier"]) + 24))
     iq_tag_h = 24
     iq_tag_x = panel_x + panel_w - iq_tag_w - 12
     iq_tag_y = y + 28
@@ -924,12 +946,12 @@ def create_premium_overlay(
 
     y += IQ_H + 8
 
-    # 9-level bar: each completed level remains visually separated.
+    # 12-level bar: each completed level remains visually separated.
     level_bar_x = panel_x
     level_bar_y = y
     level_bar_w = panel_w
     level_bar_h = 6
-    segment_gap = 4
+    segment_gap = 3
     segment_w = (level_bar_w - segment_gap * (LEVEL_COUNT - 1)) / LEVEL_COUNT
     completed_levels = _level_number(display_blue_iq)
     fill_color = _level_color(completed_levels)
@@ -1163,10 +1185,10 @@ def create_overlay(frame, metrics, frame_number, TARGET_WIDTH, logo_path=None, d
 
         tier_y = score_panel_y + 162
         tier_labels = [
-            ("NEEDS WORK", (74, 96, 214)),
-            ("DEVELOPING", (42, 157, 244)),
-            ("STRONG", (108, 166, 32)),
-            ("EXCELLENT", (42, 42, 42)),
+            ("BUILDING", (22, 115, 249)),
+            ("PROGRESSING", (248, 189, 56)),
+            ("ADVANCING", (255, 175, 106)),
+            ("MASTERING", (94, 197, 34)),
         ]
         tier_w = (panel_w - 48) // 4
         for i, (label, color) in enumerate(tier_labels):
@@ -1187,7 +1209,6 @@ def create_overlay(frame, metrics, frame_number, TARGET_WIDTH, logo_path=None, d
             row_y += 56
 
         cv2.rectangle(overlay, (panel_x, 570), (panel_x + panel_w, 704), colors["panel"], -1)
-        cv2.rectangle(overlay, (panel_x, 570), (panel_x + panel_w, 704), colors["line"], 1)
         cv2.putText(overlay, "LIVE RUN METRICS", (panel_x + 24, 606),
                     cv2.FONT_HERSHEY_DUPLEX, 0.72, colors["text"], 2)
 

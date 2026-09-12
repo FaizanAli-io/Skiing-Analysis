@@ -2,6 +2,7 @@ from datetime import date, datetime
 from typing import List
 
 from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from database import get_db
@@ -39,7 +40,10 @@ def my_attempts(
 ):
     attempts = (
         db.query(VideoAnalysis)
-        .filter(VideoAnalysis.person_id == current_user.id)
+        .filter(
+            VideoAnalysis.person_id == current_user.id,
+            or_(VideoAnalysis.is_archived.is_(False), VideoAnalysis.is_archived.is_(None)),
+        )
         .order_by(VideoAnalysis.attempt_number.desc().nullslast(), VideoAnalysis.id.desc())
         .offset(skip)
         .limit(limit)
@@ -99,6 +103,7 @@ def get_performance_trends(
         .filter(
             VideoAnalysis.person_id == current_user.id,
             (VideoAnalysis.status == "completed") | (VideoAnalysis.status.is_(None)),
+            or_(VideoAnalysis.is_archived.is_(False), VideoAnalysis.is_archived.is_(None)),
         )
         .order_by(VideoAnalysis.created_at.asc().nullsfirst(), VideoAnalysis.id.asc())
         .all()

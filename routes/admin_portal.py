@@ -1,18 +1,22 @@
-from typing import List, Literal
+import os
+import logging
+from typing import List, Literal, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from database import get_db
 from models.person import Person
 from models.video_analysis import VideoAnalysis
 from models.analysis_timeline import AnalysisTimeline
+from models.analysis_job import AnalysisJob
 from schemas.analysis_timeline import AnalysisTimelineOut
 from schemas.person import PersonOut
 from schemas.video_analysis import VideoAnalysisOut
 from schemas.personal_best import LeaderboardsResponse, PersonalBestsResponse
 from services.auth import require_admin
-from services.aws_s3 import S3Manager
+from services.aws_s3 import S3Manager, AWS_S3_BUCKET
 from services.personal_bests import (
     build_leaderboards,
     enrich_attempts,
@@ -23,6 +27,7 @@ from services.analysis_timeline import (
     sanitize_parameter_config,
 )
 
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/admin", tags=["Admin Portal"])
 
@@ -53,12 +58,19 @@ def admin_get_user(
 def admin_list_attempts(
     skip: int = 0,
     limit: int = 100,
+    include_archived: bool = Query(False, description="Include archived runs"),
+    only_archived: bool = Query(False, description="Only return archived runs"),
     _admin: Person = Depends(require_admin),
     db: Session = Depends(get_db),
 ):
+    query = db.query(VideoAnalysis)
+    if only_archived:
+        query = query.filter(VideoAnalysis.is_archived.is_(True))
+    elif not include_archived:
+        query = query.filter(or_(VideoAnalysis.is_archived.is_(False), VideoAnalysis.is_archived.is_(None)))
+
     attempts = (
-        db.query(VideoAnalysis)
-        .order_by(VideoAnalysis.created_at.desc().nullslast(), VideoAnalysis.id.desc())
+        query.order_by(VideoAnalysis.created_at.desc().nullslast(), VideoAnalysis.id.desc())
         .offset(skip)
         .limit(limit)
         .all()
@@ -81,6 +93,8 @@ def admin_user_attempts(
     user_id: int,
     skip: int = 0,
     limit: int = 50,
+    include_archived: bool = Query(False, description="Include archived runs"),
+    only_archived: bool = Query(False, description="Only return archived runs"),
     _admin: Person = Depends(require_admin),
     db: Session = Depends(get_db),
 ):
@@ -88,10 +102,14 @@ def admin_user_attempts(
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     
+    query = db.query(VideoAnalysis).filter(VideoAnalysis.person_id == user_id)
+    if only_archived:
+        query = query.filter(VideoAnalysis.is_archived.is_(True))
+    elif not include_archived:
+        query = query.filter(or_(VideoAnalysis.is_archived.is_(False), VideoAnalysis.is_archived.is_(None)))
+
     attempts = (
-        db.query(VideoAnalysis)
-        .filter(VideoAnalysis.person_id == user_id)
-        .order_by(VideoAnalysis.attempt_number.desc().nullslast(), VideoAnalysis.id.desc())
+        query.order_by(VideoAnalysis.attempt_number.desc().nullslast(), VideoAnalysis.id.desc())
         .offset(skip)
         .limit(limit)
         .all()
@@ -107,6 +125,77 @@ def admin_user_attempts(
 
     enrich_attempts(db, attempts)
     return attempts
+
+
+@router.post("/attempts/{attempt_id}/archive")
+def admin_archive_attempt(
+    attempt_id: int,
+    _admin: Person = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    attempt = db.query(VideoAnalysis).filter(VideoAnalysis.id == attempt_id).first()
+    if not attempt:
+        raise HTTPException(status_code=404, detail="Attempt not found")
+    
+    attempt.is_archived = True
+    db.commit()
+    return {"message": "Attempt archived successfully", "id": attempt_id, "is_archived": True}
+
+
+@router.post("/attempts/{attempt_id}/restore")
+def admin_restore_attempt(
+    attempt_id: int,
+    _admin: Person = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    attempt = db.query(VideoAnalysis).filter(VideoAnalysis.id == attempt_id).first()
+    if not attempt:
+        raise HTTPException(status_code=404, detail="Attempt not found")
+    
+    attempt.is_archived = False
+    db.commit()
+    return {"message": "Attempt restored successfully", "id": attempt_id, "is_archived": False}
+
+
+@router.delete("/attempts/{attempt_id}")
+def admin_delete_attempt(
+    attempt_id: int,
+    _admin: Person = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    attempt = db.query(VideoAnalysis).filter(VideoAnalysis.id == attempt_id).first()
+    if not attempt:
+        raise HTTPException(status_code=404, detail="Attempt not found")
+
+    # 1. Unlink any analysis jobs referencing this video analysis
+    db.query(AnalysisJob).filter(AnalysisJob.video_analysis_id == attempt_id).update({"video_analysis_id": None})
+
+    # 2. Delete associated timeline if exists
+    db.query(AnalysisTimeline).filter(AnalysisTimeline.video_analysis_id == attempt_id).delete()
+
+    # 3. Clean up S3 files if enabled
+    if S3Manager.is_enabled() and AWS_S3_BUCKET:
+        for key in (attempt.s3_video_key, attempt.s3_report_key, attempt.s3_snapshot_key):
+            if key:
+                try:
+                    S3Manager.delete_file(AWS_S3_BUCKET, key)
+                except Exception as exc:
+                    logger.warning(f"Failed to delete S3 file {key}: {exc}")
+
+    # 4. Clean up local files
+    for path in (attempt.input_video_path, attempt.output_video_path, attempt.report_path):
+        if path and os.path.exists(path):
+            try:
+                os.remove(path)
+                logger.info(f"Deleted local file: {path}")
+            except Exception as exc:
+                logger.warning(f"Failed to delete local file {path}: {exc}")
+
+    # 5. Delete the VideoAnalysis row
+    db.delete(attempt)
+    db.commit()
+
+    return {"message": "Attempt permanently deleted", "id": attempt_id}
 
 
 @router.get(

@@ -293,7 +293,7 @@ class SkierScoring:
     def getPressureVerticalRangeScore(
         self,
         relative_heights,
-        minimum_useful_range=0.05,
+        minimum_useful_range=0.005,
         target_range=0.12,
     ):
         """Map normalized vertical travel linearly onto the 60-240 scale."""
@@ -333,7 +333,7 @@ class SkierScoring:
     def getPressureKneeRangeScore(
         self,
         knee_angles,
-        minimum_useful_range=18.0,
+        minimum_useful_range=8.0,
         target_range=45.0,
     ):
         """Map knee flexion/extension range linearly onto the 60-240 scale."""

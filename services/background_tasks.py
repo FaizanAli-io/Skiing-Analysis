@@ -308,9 +308,10 @@ def process_video_analysis_background(
             session_date=session_date,
             session_number=personal_best_context["session_number"],
             previous_personal_bests=personal_best_context["personal_bests"],
+            progress_callback=lambda p: update_job_progress(job_id, p),
         )
 
-        update_job_progress(job_id, 60)
+        update_job_progress(job_id, 70)
 
         s3_video_url = None
         s3_report_url = None

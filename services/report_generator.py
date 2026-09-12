@@ -21,10 +21,10 @@ PAGE_W = 1275
 PAGE_H = 1650
 
 SCORE_BANDS = (
-    ("Emerging", 60, 129, (255, 93, 76)),
-    ("Developing", 130, 169, (245, 158, 11)),
-    ("Proficient", 170, 199, (34, 197, 94)),
-    ("Excellent", 200, 240, (106, 175, 255)),
+    ("Building", 60, 104, (249, 115, 22)),      # Orange
+    ("Progressing", 105, 149, (56, 189, 248)),  # Sky blue
+    ("Advancing", 150, 194, (106, 175, 255)),   # Blue
+    ("Mastering", 195, 240, (34, 197, 94)),     # Green
 )
 
 FACTOR_KEYS = (
@@ -52,146 +52,178 @@ PILLAR_GUIDANCE = {
     "edging": "Edging reflects edge engagement, ski parallel control, and ability to hold a clean arc.",
 }
 
+# 12 Sub-levels: 4 stages x 3 sub-levels (15 points per step across 60-240)
 BLUEIQ_LEVEL_GUIDE = (
     {
         "level": 1,
-        "name": "Getting Started",
-        "category": "Beginner",
+        "stage": "Building",
+        "sub_level": 1,
+        "name": "Building 1",
+        "category": "Building",
         "low": 60,
-        "high": 80,
-        "status": "First-time skier building comfort on skis.",
-        "key_focus": "Build equipment familiarity, basic movement, safe sliding, wedge turns, stopping, falling, and getting up.",
-        "interpretations": (
-            (60, 70, "Needs guidance in basic balance and movement."),
-            (71, 80, "Demonstrates improved control over movement, turning, and stopping."),
-        ),
+        "high": 74,
+        "status": "Establishing baseline comfort and movement on skis.",
+        "key_focus": "Equipment familiarity, centered stance, basic gliding, wedge turns, and safe stopping.",
     },
     {
         "level": 2,
-        "name": "Building Confidence",
-        "category": "Beginner",
-        "low": 81,
-        "high": 100,
-        "status": "Ready to add new skills with more comfort on skis.",
-        "key_focus": "Develop foot tilting for turns, speed and direction control, linking S-turns, and dynamic movement.",
-        "interpretations": (
-            (81, 90, "Can consistently perform gliding wedge turns but needs refinement."),
-            (91, 100, "Links turns smoothly with improved balance and speed control."),
-        ),
+        "stage": "Building",
+        "sub_level": 2,
+        "name": "Building 2",
+        "category": "Building",
+        "low": 75,
+        "high": 89,
+        "status": "Building confidence and balance through turns.",
+        "key_focus": "Linking turns smoothly, developing foot tilt, and improving speed control.",
     },
     {
         "level": 3,
-        "name": "Developing Control",
-        "category": "Intermediate",
-        "low": 101,
-        "high": 120,
-        "status": "Learning to ski with more control and confidence.",
-        "key_focus": "Improve gliding wedge and wedge christie turns, parallel ski matching at the end of turns, and speed management.",
-        "interpretations": (
-            (101, 110, "Beginning parallel skiing while still using a wedge for support."),
-            (111, 120, "Achieves more confident parallel turns and controls speed more effectively."),
-        ),
+        "stage": "Building",
+        "sub_level": 3,
+        "name": "Building 3",
+        "category": "Building",
+        "low": 90,
+        "high": 104,
+        "status": "Demonstrating steady progression and consistent turn control.",
+        "key_focus": "Refining wedge christie turns, upper body stability, and cleaner transitions.",
     },
     {
         "level": 4,
-        "name": "Finding Fluidity",
-        "category": "Intermediate",
-        "low": 121,
-        "high": 140,
-        "status": "Skiing with smoother and more fluid movement.",
-        "key_focus": "Develop wedge christie turns, side slipping, hockey-stop control, edge control, and pressure management.",
-        "interpretations": (
-            (121, 130, "Executes intermediate wedge christie turns and basic side slipping."),
-            (131, 140, "Consistently moves toward parallel turns by mid-turn with better stopping control."),
-        ),
+        "stage": "Progressing",
+        "sub_level": 1,
+        "name": "Progressing 1",
+        "category": "Progressing",
+        "low": 105,
+        "high": 119,
+        "status": "Beginning parallel ski matching with growing rhythm.",
+        "key_focus": "Parallel matching before turn completion, edge engagement, and maintaining centered balance.",
     },
     {
         "level": 5,
-        "name": "Building Rhythm",
-        "category": "Intermediate",
-        "low": 141,
-        "high": 160,
-        "status": "Building rhythm and flow.",
-        "key_focus": "Begin turns with parallel skis, add pole touches, improve edge engagement, and navigate uneven surfaces.",
-        "interpretations": (
-            (141, 150, "Shows better wedge christie control while speed refinement is still needed."),
-            (151, 160, "Shows stronger parallel control with better balance and edge use."),
-        ),
+        "stage": "Progressing",
+        "sub_level": 2,
+        "name": "Progressing 2",
+        "category": "Progressing",
+        "low": 120,
+        "high": 134,
+        "status": "Skiing with smoother flow, fluidity, and coordinated edge control.",
+        "key_focus": "Active knee flexion, side slipping, fluid turn transitions, and speed management.",
     },
     {
         "level": 6,
-        "name": "Parallel Precision",
-        "category": "Intermediate",
-        "low": 161,
-        "high": 180,
-        "status": "Skiing fully parallel with more control.",
-        "key_focus": "Refine edged and steered parallel turns, speed management, turn shape, and adaptation to terrain and snow surface.",
-        "interpretations": (
-            (161, 170, "Shows consistent parallel turns with growing versatility."),
-            (171, 180, "Shows strong ability to adjust turn shape and speed."),
-        ),
+        "stage": "Progressing",
+        "sub_level": 3,
+        "name": "Progressing 3",
+        "category": "Progressing",
+        "low": 135,
+        "high": 149,
+        "status": "Demonstrating solid parallel turns with consistent tempo.",
+        "key_focus": "Beginning turns with parallel skis, refined pressure modulation, and disciplined upper body.",
     },
     {
         "level": 7,
-        "name": "Terrain Tactics",
-        "category": "Proficient",
-        "low": 181,
-        "high": 200,
-        "status": "Training for real-mountain conditions.",
-        "key_focus": "Develop short-radius turns, tactical decision-making, and clearer separation between pivoting and edging.",
-        "interpretations": (
-            (181, 190, "Shows early tactical decision-making and developing short-radius turn control."),
-            (191, 200, "Shows stronger short-turn mastery, control, and speed adaptability."),
-        ),
+        "stage": "Advancing",
+        "sub_level": 1,
+        "name": "Advancing 1",
+        "category": "Advancing",
+        "low": 150,
+        "high": 164,
+        "status": "Advancing technical precision across turn shapes.",
+        "key_focus": "Consistent parallel steering, progressive edge angulation, and centered dynamic stance.",
     },
     {
         "level": 8,
-        "name": "Intentional Skiing",
-        "category": "Expert",
-        "low": 201,
-        "high": 220,
-        "status": "Skiing with purpose and intention.",
-        "key_focus": "Use ski tilting as the primary turning mechanism, refine advanced turn entries, and adapt tactics to speed and terrain.",
-        "interpretations": (
-            (201, 210, "Shows strong technical control while alternative turn entries still need refinement."),
-            (211, 220, "Executes turns with mastery and adapts tactics well."),
-        ),
+        "stage": "Advancing",
+        "sub_level": 2,
+        "name": "Advancing 2",
+        "category": "Advancing",
+        "low": 165,
+        "high": 179,
+        "status": "Executing high-level dynamic carving and precise pressure release.",
+        "key_focus": "Early edge engagement, upper-lower body separation, and rhythmic speed control.",
     },
     {
         "level": 9,
-        "name": "Mastery and Flow",
-        "category": "Expert",
-        "low": 221,
+        "stage": "Advancing",
+        "sub_level": 3,
+        "name": "Advancing 3",
+        "category": "Advancing",
+        "low": 180,
+        "high": 194,
+        "status": "Approaching master-level consistency and power through the turn arc.",
+        "key_focus": "Dynamic lateral angulation, precise edge transition, and disciplined fall-line control.",
+    },
+    {
+        "level": 10,
+        "stage": "Mastering",
+        "sub_level": 1,
+        "name": "Mastering 1",
+        "category": "Mastering",
+        "low": 195,
+        "high": 209,
+        "status": "Mastering technical precision, speed, and continuous arc control.",
+        "key_focus": "High-velocity carving, rapid edge changes, and full biomechanical efficiency.",
+    },
+    {
+        "level": 11,
+        "stage": "Mastering",
+        "sub_level": 2,
+        "name": "Mastering 2",
+        "category": "Mastering",
+        "low": 210,
+        "high": 224,
+        "status": "Demonstrating elite ski performance and exceptional dynamic balance.",
+        "key_focus": "Flawless pressure management, advanced carving versatility, and deep athletic angulation.",
+    },
+    {
+        "level": 12,
+        "stage": "Mastering",
+        "sub_level": 3,
+        "name": "Mastering 3",
+        "category": "Mastering",
+        "low": 225,
         "high": 240,
-        "status": "Mastering all conditions with skill and strategy.",
-        "key_focus": "Refine high-speed short and long-radius turns, tactical decisions, and performance across steeps, gates, bumps, powder, and carved turns.",
-        "interpretations": (
-            (221, 230, "Shows strong mastery of high-speed turns with minor refinements needed."),
-            (231, 240, "Shows elite-level execution across technical demands."),
-        ),
+        "status": "Peak technical mastery across all biomechanical performance pillars.",
+        "key_focus": "Complete mastery of edging, rotation, pressure, and balance in all conditions.",
     },
 )
 
 APPROVED_COACHING_CUES = {
     "pressure": {
+        "building": "Build a smoother pressure release so the skier is not forced back at the end of the turn.",
+        "progressing": "Work on applying pressure progressively across both skis instead of loading the turn all at once.",
+        "advancing": "Refine pressure timing so the skier can stay strong through the middle of the turn.",
+        "mastering": "Maintain the same pressure control while increasing turn shape and speed.",
         "emerging": "Build a smoother pressure release so the skier is not forced back at the end of the turn.",
         "developing": "Work on applying pressure progressively across both skis instead of loading the turn all at once.",
         "proficient": "Refine pressure timing so the skier can stay strong through the middle of the turn.",
         "excellent": "Maintain the same pressure control while increasing turn shape and speed.",
     },
     "balance": {
+        "building": "Focus on staying centered over the feet before adding more speed or turn shape.",
+        "progressing": "Build a quieter upper body and keep the stance centered through each transition.",
+        "advancing": "Refine balance consistency as the skier moves from one edge to the next.",
+        "mastering": "Keep the same centered stance while challenging the skier with more varied turn shapes.",
         "emerging": "Focus on staying centered over the feet before adding more speed or turn shape.",
         "developing": "Build a quieter upper body and keep the stance centered through each transition.",
         "proficient": "Refine balance consistency as the skier moves from one edge to the next.",
         "excellent": "Keep the same centered stance while challenging the skier with more varied turn shapes.",
     },
     "rotation": {
+        "building": "Keep the upper body calmer so the skis can finish the turn without extra twisting.",
+        "progressing": "Work on separating upper-body discipline from lower-body turning action.",
+        "advancing": "Refine rotational control so the skier directs the turn without over-rotating the shoulders.",
+        "mastering": "Maintain disciplined rotation while increasing tempo and precision.",
         "emerging": "Keep the upper body calmer so the skis can finish the turn without extra twisting.",
         "developing": "Work on separating upper-body discipline from lower-body turning action.",
         "proficient": "Refine rotational control so the skier directs the turn without over-rotating the shoulders.",
         "excellent": "Maintain disciplined rotation while increasing tempo and precision.",
     },
     "edging": {
+        "building": "Start with cleaner ski alignment so both skis work together earlier in the turn.",
+        "progressing": "Improve edge engagement by keeping the skis more parallel through the turn entry.",
+        "advancing": "Refine edge control so the skier can hold a cleaner arc through the fall line.",
+        "mastering": "Preserve strong edge control while increasing speed and consistency.",
         "emerging": "Start with cleaner ski alignment so both skis work together earlier in the turn.",
         "developing": "Improve edge engagement by keeping the skis more parallel through the turn entry.",
         "proficient": "Refine edge control so the skier can hold a cleaner arc through the fall line.",
@@ -201,24 +233,40 @@ APPROVED_COACHING_CUES = {
 
 APPROVED_PILLAR_ASSESSMENTS = {
     "pressure": {
+        "building": "Pressure management is building, with developing consistency in how load is built and released through the turn.",
+        "progressing": "Pressure management is progressing, with some controlled loading and release but developing timing across the run.",
+        "advancing": "Pressure control is advancing, with generally consistent loading and release through most turns.",
+        "mastering": "Pressure control is mastering, with precise and consistent loading and release across the run.",
         "emerging": "Pressure management is emerging, with limited consistency in how load is built and released through the turn.",
         "developing": "Pressure management is developing, with some controlled loading and release but inconsistent timing across the run.",
         "proficient": "Pressure control is proficient, with generally consistent loading and release through most turns.",
         "excellent": "Pressure control is excellent, with precise and consistent loading and release across the run.",
     },
     "balance": {
+        "building": "Balance is building, with centered stance and stability developing through the run.",
+        "progressing": "Balance is progressing, with periods of centered control and growing stability through transitions.",
+        "advancing": "Balance is advancing, with a generally centered stance and stable movement through most transitions.",
+        "mastering": "Balance is mastering, with an athletic centered stance and consistent stability throughout the run.",
         "emerging": "Balance is emerging, with centered stance and stability remaining inconsistent through the run.",
         "developing": "Balance is developing, with periods of centered control but uneven stability through transitions.",
         "proficient": "Balance is proficient, with a generally centered stance and stable movement through most transitions.",
         "excellent": "Balance is excellent, with a centered stance and consistent stability throughout the run.",
     },
     "rotation": {
+        "building": "Rotational control is building, with upper- and lower-body coordination developing.",
+        "progressing": "Rotational control is progressing, with effective separation developing alongside upper-body discipline.",
+        "advancing": "Rotational control is advancing, with coordinated lower-body turning and generally disciplined upper-body movement.",
+        "mastering": "Rotational control is mastering, with precise upper- and lower-body coordination throughout the run.",
         "emerging": "Rotational control is emerging, with upper- and lower-body coordination remaining inconsistent.",
         "developing": "Rotational control is developing, with some effective separation but inconsistent upper-body discipline.",
         "proficient": "Rotational control is proficient, with coordinated lower-body turning and generally disciplined upper-body movement.",
         "excellent": "Rotational control is excellent, with precise upper- and lower-body coordination throughout the run.",
     },
     "edging": {
+        "building": "Edging is building, with ski alignment and edge engagement developing.",
+        "progressing": "Edging is progressing, with periods of parallel ski control and developing engagement through the turn.",
+        "advancing": "Edging is advancing, with generally parallel ski control and consistent engagement through most turns.",
+        "mastering": "Edging is mastering, with precise ski alignment and consistent engagement throughout the run.",
         "emerging": "Edging is emerging, with ski alignment and edge engagement remaining inconsistent.",
         "developing": "Edging is developing, with periods of parallel ski control but inconsistent engagement through the turn.",
         "proficient": "Edging is proficient, with generally parallel ski control and consistent engagement through most turns.",
@@ -227,6 +275,10 @@ APPROVED_PILLAR_ASSESSMENTS = {
 }
 
 APPROVED_OVERALL_ASSESSMENTS = {
+    "building": "The result reflects a building foundation, with consistency and control requiring focused development.",
+    "progressing": "The result reflects progressing control, with repeatable movement alongside clear opportunities for greater consistency.",
+    "advancing": "The result reflects advancing control across the run, with targeted refinement needed for greater consistency.",
+    "mastering": "The result reflects mastering control and consistency across the four performance pillars.",
     "emerging": "The result reflects an emerging foundation, with consistency and control requiring focused development.",
     "developing": "The result reflects developing control, with repeatable movement alongside clear opportunities for greater consistency.",
     "proficient": "The result reflects proficient control across the run, with targeted refinement needed for greater consistency.",
@@ -241,16 +293,29 @@ BASELINE_COMPARISON_PATTERN = re.compile(
 )
 
 
-def _score_band(score: float) -> str:
-    rounded = int(round(float(score or 0)))
+def _score_level_label(score: float) -> str:
+    rounded = _ceil_score(score)
+    for guide in BLUEIQ_LEVEL_GUIDE:
+        if guide["low"] <= rounded <= guide["high"]:
+            return guide["name"]
+    return BLUEIQ_LEVEL_GUIDE[0]["name"] if rounded < 60 else BLUEIQ_LEVEL_GUIDE[-1]["name"]
+
+
+def _score_stage(score: float) -> str:
+    rounded = _ceil_score(score)
     for label, low, high, _color in SCORE_BANDS:
         if low <= rounded <= high:
             return label
-    return "Emerging" if rounded < 60 else "Excellent"
+    return SCORE_BANDS[0][0] if rounded < 60 else SCORE_BANDS[-1][0]
+
+
+def _score_band(score: float) -> str:
+    """Return the 12-step stage and sub-level label (e.g. 'Building 2', 'Progressing 1')."""
+    return _score_level_label(score)
 
 
 def _score_color(score: float) -> tuple:
-    rounded = int(round(float(score or 0)))
+    rounded = _ceil_score(score)
     for _label, low, high, color in SCORE_BANDS:
         if low <= rounded <= high:
             return color
@@ -258,7 +323,7 @@ def _score_color(score: float) -> tuple:
 
 
 def _score_band_key(score: float) -> str:
-    return _score_band(score).lower()
+    return _score_stage(score).lower()
 
 
 def _approved_cue(pillar: str, score: float) -> str:
@@ -320,15 +385,12 @@ def _report_level_context(score: float) -> Dict[str, Any]:
 
 def _level_context_sentence(payload: Dict[str, Any]) -> str:
     level = payload.get("blueiq_level") or _report_level_context(payload["final_scores"]["blue_iq"])
-    return (
-        f"Blue IQ places this skier at {level['category']} Level {level['level']}: "
-        f"{level['name']}."
-    )
+    return f"Blue IQ places this skier at {level['name']}."
 
 
 def _level_focus_cue(payload: Dict[str, Any]) -> str:
     level = payload.get("blueiq_level") or _report_level_context(payload["final_scores"]["blue_iq"])
-    return f"Current BlueIQ level focus: {level['key_focus']}"
+    return f"Current stage focus ({level['name']}): {level['key_focus']}"
 
 
 def _safe_average(values: List[float]) -> Optional[float]:
@@ -633,17 +695,17 @@ def _fixed_overall_summary(payload: Dict[str, Any]) -> str:
     if status == "baseline":
         score_context = (
             f"This first recorded run establishes a Blue IQ baseline of "
-            f"{blue_iq:.0f}/240 in the {band_label} band."
+            f"{blue_iq:.0f}/240 at the {band_label} stage."
         )
     elif status == "new_personal_best":
         score_context = (
             f"This run sets a new personal-best Blue IQ of {blue_iq:.0f}/240 "
-            f"in the {band_label} band."
+            f"at the {band_label} stage."
         )
     else:
         score_context = (
-            f"This run records a Blue IQ of {blue_iq:.0f}/240 in the "
-            f"{band_label} band."
+            f"This run records a Blue IQ of {blue_iq:.0f}/240 at the "
+            f"{band_label} stage."
         )
 
     ranked = sorted(

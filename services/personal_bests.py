@@ -291,7 +291,11 @@ def _completed_attempts_query(db):
         or_(
             VideoAnalysis.status == "completed",
             VideoAnalysis.status.is_(None),
-        )
+        ),
+        or_(
+            VideoAnalysis.is_archived.is_(False),
+            VideoAnalysis.is_archived.is_(None),
+        ),
     )
 
 

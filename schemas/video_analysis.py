@@ -23,10 +23,12 @@ class VideoAnalysisCreate(BaseModel):
     turns: Optional[int] = None
     duration: Optional[float] = None
     status: Optional[str] = "completed"
+    is_archived: Optional[bool] = False
     timestamp: Optional[datetime] = None
 
 class VideoAnalysisOut(VideoAnalysisCreate):
     id: int
+    is_archived: bool = False
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
     session_date: Optional[str] = None

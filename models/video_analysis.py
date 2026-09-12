@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Float, ForeignKey, DateTime
+from sqlalchemy import Column, Integer, String, Float, ForeignKey, DateTime, Boolean
 from sqlalchemy.orm import relationship
 from database import Base
 from datetime import datetime
@@ -28,6 +28,7 @@ class VideoAnalysis(Base):
     turns = Column(Integer, nullable=True)
     duration = Column(Float, nullable=True)
     status = Column(String(50), default="completed")
+    is_archived = Column(Boolean, default=False, nullable=False, index=True)
     timestamp = Column(DateTime, default=datetime.utcnow)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
