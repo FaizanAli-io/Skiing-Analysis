@@ -38,13 +38,16 @@ def get_job_status(
     response = JobStatusWithResult(
         job_id=job.id,
         person_id=job.person_id,
+        person_name=job.person.name if job.person else None,
         file_name=job.file_name,
+        display_mode=job.display_mode,
         status=job.status,
         progress=job.progress,
         error_message=job.error_message,
         created_at=job.created_at,
         started_at=job.started_at,
         completed_at=job.completed_at,
+        video_analysis_id=job.video_analysis_id,
         result=None
     )
     
@@ -84,16 +87,31 @@ def list_jobs(
         JobStatus(
             job_id=job.id,
             person_id=job.person_id,
+            person_name=job.person.name if job.person else None,
             file_name=job.file_name,
+            display_mode=job.display_mode,
             status=job.status,
             progress=job.progress,
             error_message=job.error_message,
             created_at=job.created_at,
             started_at=job.started_at,
             completed_at=job.completed_at,
+            video_analysis_id=job.video_analysis_id,
         )
         for job in jobs
     ]
+
+
+@router.post("/clear-queue")
+def clear_queue(
+    current_user: Person = Depends(require_admin),
+    db: Session = Depends(get_db)
+):
+    """
+    Clear/cancel all pending and processing jobs in the queue (admin only).
+    """
+    cleared_count = job_crud.clear_all_queue_jobs(db)
+    return {"message": f"Cleared {cleared_count} jobs from queue", "cleared_count": cleared_count}
 
 
 @router.delete("/{job_id}")
@@ -103,8 +121,7 @@ def delete_job(
     db: Session = Depends(get_db)
 ):
     """
-    Delete a job (admin only).
-    Only completed or failed jobs can be deleted.
+    Delete a job from history or cancel from queue (admin only).
     """
     job = job_crud.get_job(db, job_id)
     
@@ -112,12 +129,6 @@ def delete_job(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Job not found"
-        )
-    
-    if job.status not in ["completed", "failed"]:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Only completed or failed jobs can be deleted"
         )
     
     db.delete(job)

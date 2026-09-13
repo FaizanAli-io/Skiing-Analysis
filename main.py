@@ -4,6 +4,7 @@ from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
 import shutil
 import os
+import re
 from datetime import date
 import uuid
 
@@ -253,4 +254,101 @@ async def analyze_ski_video_premium_overlay(
         "job_id": job_id,
         "status": "pending",
         "message": "Video upload successful. Processing started in background."
+    }
+
+
+@app.get("/api/config/google-drive")
+def get_google_drive_config():
+    """Return public Google API keys / client ID for Google Picker."""
+    return {
+        "client_id": os.getenv("GOOGLE_CLIENT_ID", ""),
+        "api_key": os.getenv("GOOGLE_API_KEY", ""),
+        "app_id": os.getenv("GOOGLE_APP_ID", ""),
+    }
+
+
+@app.post("/api/analyze-google-drive/")
+async def analyze_ski_video_google_drive(
+    background_tasks: BackgroundTasks,
+    user_id: int = Form(...),
+    display_mode: str = Form("coach"),
+    report: bool = Form(False),
+    drive_file_id: Optional[str] = Form(None),
+    drive_url: Optional[str] = Form(None),
+    file_name: Optional[str] = Form(None),
+    oauth_token: Optional[str] = Form(None),
+    current_admin: Person = Depends(require_admin),
+):
+    """
+    Queue a Google Drive video for background analysis.
+    Downloads the video directly in the worker and runs the sequential pipeline.
+    """
+    from services.google_drive import extract_drive_file_id, get_drive_file_metadata
+    from services.background_tasks import process_google_drive_analysis_background
+
+    resolved_file_id = extract_drive_file_id(drive_file_id or drive_url or "")
+    if not resolved_file_id:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid Google Drive link or File ID. Please check the URL and try again."
+        )
+
+    # Validate user exists
+    read_db = SessionLocal()
+    try:
+        db_user = person_crud.get_person(read_db, user_id)
+        if not db_user:
+            raise HTTPException(status_code=404, detail="User not found")
+        user_name = db_user.name
+        attempt_number = video_crud.get_next_attempt_number(read_db, user_id)
+    finally:
+        close_session_quietly(read_db)
+
+    # Resolve filename
+    actual_filename = file_name
+    if not actual_filename or actual_filename.strip() in ("", "undefined"):
+        meta = get_drive_file_metadata(resolved_file_id, oauth_token=oauth_token)
+        actual_filename = meta.get("name", f"gdrive_{resolved_file_id[:8]}.mp4")
+
+    # Generate unique job ID
+    job_id = str(uuid.uuid4())
+    os.makedirs("temp_videos", exist_ok=True)
+    clean_name = re.sub(r'[^\w\-_\.]', '_', actual_filename)
+    if not clean_name.lower().endswith(('.mp4', '.mov', '.avi', '.mkv')):
+        clean_name += ".mp4"
+    file_location = f"temp_videos/{job_id}_{clean_name}"
+
+    # Create job record in database
+    write_db = SessionLocal()
+    try:
+        job_crud.create_job(
+            write_db,
+            job_id=job_id,
+            person_id=user_id,
+            file_name=actual_filename,
+            display_mode=display_mode,
+            generate_report=report
+        )
+    finally:
+        close_session_quietly(write_db)
+
+    # Add background task for sequential queue
+    background_tasks.add_task(
+        process_google_drive_analysis_background,
+        job_id=job_id,
+        drive_file_id=resolved_file_id,
+        file_path=file_location,
+        user_id=user_id,
+        display_mode=display_mode,
+        report=report,
+        user_name=user_name,
+        attempt_number=attempt_number,
+        oauth_token=oauth_token,
+    )
+
+    return {
+        "job_id": job_id,
+        "status": "pending",
+        "file_name": actual_filename,
+        "message": f"Google Drive video '{actual_filename}' queued for analysis."
     }

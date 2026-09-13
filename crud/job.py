@@ -70,6 +70,39 @@ def update_job_status(
     return job
 
 
+def cleanup_stale_jobs(db: Session, max_age_minutes: int = 60) -> int:
+    """Mark jobs stuck in pending/processing longer than max_age_minutes as failed."""
+    from datetime import timedelta
+    cutoff = datetime.utcnow() - timedelta(minutes=max_age_minutes)
+    stale_jobs = db.query(AnalysisJob).filter(
+        AnalysisJob.status.in_(["pending", "processing"]),
+        AnalysisJob.created_at < cutoff
+    ).all()
+    count = len(stale_jobs)
+    for j in stale_jobs:
+        j.status = "failed"
+        j.error_message = "Analysis timed out or was interrupted"
+        j.completed_at = datetime.utcnow()
+    if count > 0:
+        db.commit()
+    return count
+
+
+def clear_all_queue_jobs(db: Session) -> int:
+    """Clear or cancel all pending/processing jobs (admin action)"""
+    stale_jobs = db.query(AnalysisJob).filter(
+        AnalysisJob.status.in_(["pending", "processing"])
+    ).all()
+    count = len(stale_jobs)
+    for j in stale_jobs:
+        j.status = "failed"
+        j.error_message = "Cancelled by administrator"
+        j.completed_at = datetime.utcnow()
+    if count > 0:
+        db.commit()
+    return count
+
+
 def get_all_jobs(
     db: Session,
     person_id: Optional[int] = None,
@@ -77,7 +110,8 @@ def get_all_jobs(
     skip: int = 0,
     limit: int = 100
 ) -> List[AnalysisJob]:
-    """Get all jobs with optional filters"""
+    """Get all jobs with optional filters, auto-cleaning up stale jobs first."""
+    cleanup_stale_jobs(db)
     query = db.query(AnalysisJob)
     
     if person_id is not None:

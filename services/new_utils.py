@@ -293,8 +293,8 @@ class SkierScoring:
     def getPressureVerticalRangeScore(
         self,
         relative_heights,
-        minimum_useful_range=0.005,
-        target_range=0.12,
+        minimum_useful_range=0.02,
+        target_range=0.14,
     ):
         """Map normalized vertical travel linearly onto the 60-240 scale."""
         vertical_range = self.getPressureVerticalRange(relative_heights)

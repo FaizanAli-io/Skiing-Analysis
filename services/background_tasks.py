@@ -16,7 +16,13 @@ from models.analysis_timeline import AnalysisTimeline
 from services.personal_bests import pre_run_personal_best_context
 
 
+import threading
+
 logger = logging.getLogger(__name__)
+
+# Sequential analysis lock: ensures only one video is analyzed at a time to prevent
+# overloading CPU/GPU with concurrent computer vision pipelines. Subsequent jobs wait in queue.
+_analysis_lock = threading.Lock()
 
 DB_MAX_ATTEMPTS = 3
 DB_RETRY_DELAY_SECONDS = 0.5
@@ -274,6 +280,99 @@ def _mark_job_failed(job_id: str, error: Exception) -> None:
         )
 
 
+def _run_pipeline_after_download(
+    job_id: str,
+    file_path: str,
+    user_id: int,
+    display_mode: str = "coach",
+    report: bool = False,
+    user_name: Optional[str] = None,
+    attempt_number: Optional[int] = None,
+):
+    """Core analysis, S3 upload, and DB commit pipeline."""
+    logger.info("Starting analysis for job %s", job_id)
+    session_date = date.today().isoformat()
+    user_name, attempt_number, personal_best_context = _prepare_job_context(
+        job_id,
+        user_id,
+        user_name,
+        attempt_number,
+        session_date,
+    )
+
+    update_job_progress(job_id, 10)
+
+    logger.info("Job %s: Running video analysis", job_id)
+    results = analyze_video(
+        file_path,
+        display_mode=display_mode,
+        overlay_renderer="premium",
+        report=report,
+        user_name=user_name,
+        attempt_number=attempt_number,
+        session_date=session_date,
+        session_number=personal_best_context["session_number"],
+        previous_personal_bests=personal_best_context["personal_bests"],
+        progress_callback=lambda p: update_job_progress(job_id, p),
+    )
+
+    update_job_progress(job_id, 70)
+
+    s3_video_url = None
+    s3_report_url = None
+    s3_uploads: Dict[str, Any] = {}
+    s3_enabled = S3Manager.is_enabled()
+    if s3_enabled:
+        logger.info("Job %s: Uploading to S3", job_id)
+        s3_uploads = upload_analysis_files(
+            video_path=results.get("output_path"),
+            report_path=results.get("report_path"),
+            snapshot_path=results.get("snapshot_path"),
+        )
+        s3_video_url = s3_uploads.get("video_url")
+        s3_report_url = s3_uploads.get("report_url")
+
+    update_job_progress(job_id, 80)
+
+    if s3_video_url:
+        results["video_url"] = s3_video_url
+    elif "output_path" in results:
+        results["video_url"] = (
+            f"/outputs/{os.path.basename(results['output_path'])}"
+        )
+
+    if s3_report_url:
+        results["report_url"] = s3_report_url
+    elif "report_path" in results:
+        results["report_url"] = (
+            f"/outputs/{os.path.basename(results['report_path'])}"
+        )
+
+    analysis_values = _build_analysis_record(
+        file_path=file_path,
+        user_id=user_id,
+        attempt_number=attempt_number,
+        display_mode=display_mode,
+        results=results,
+        s3_uploads=s3_uploads,
+        s3_enabled=s3_enabled,
+        s3_report_url=s3_report_url,
+    )
+
+    logger.info("Job %s: Saving to database", job_id)
+    timeline_values = results.get("analysis_timeline")
+    analysis_id = _save_completed_analysis(
+        job_id,
+        analysis_values,
+        timeline_values=timeline_values,
+    )
+    logger.info(
+        "Job %s: Completed successfully as analysis %s",
+        job_id,
+        analysis_id,
+    )
+
+
 def process_video_analysis_background(
     job_id: str,
     file_path: str,
@@ -284,89 +383,57 @@ def process_video_analysis_background(
     attempt_number: Optional[int] = None,
 ):
     """Process one video without holding a DB session during long work."""
-    try:
-        logger.info("Starting background analysis for job %s", job_id)
-        session_date = date.today().isoformat()
-        user_name, attempt_number, personal_best_context = _prepare_job_context(
-            job_id,
-            user_id,
-            user_name,
-            attempt_number,
-            session_date,
-        )
-
-        update_job_progress(job_id, 10)
-
-        logger.info("Job %s: Running video analysis", job_id)
-        results = analyze_video(
-            file_path,
-            display_mode=display_mode,
-            overlay_renderer="premium",
-            report=report,
-            user_name=user_name,
-            attempt_number=attempt_number,
-            session_date=session_date,
-            session_number=personal_best_context["session_number"],
-            previous_personal_bests=personal_best_context["personal_bests"],
-            progress_callback=lambda p: update_job_progress(job_id, p),
-        )
-
-        update_job_progress(job_id, 70)
-
-        s3_video_url = None
-        s3_report_url = None
-        s3_uploads: Dict[str, Any] = {}
-        s3_enabled = S3Manager.is_enabled()
-        if s3_enabled:
-            logger.info("Job %s: Uploading to S3", job_id)
-            s3_uploads = upload_analysis_files(
-                video_path=results.get("output_path"),
-                report_path=results.get("report_path"),
-                snapshot_path=results.get("snapshot_path"),
+    logger.info("Job %s: Waiting in queue for runner slot...", job_id)
+    with _analysis_lock:
+        try:
+            _run_pipeline_after_download(
+                job_id=job_id,
+                file_path=file_path,
+                user_id=user_id,
+                display_mode=display_mode,
+                report=report,
+                user_name=user_name,
+                attempt_number=attempt_number,
             )
-            s3_video_url = s3_uploads.get("video_url")
-            s3_report_url = s3_uploads.get("report_url")
+        except Exception as exc:
+            logger.error("Job %s failed: %s", job_id, exc, exc_info=True)
+            _mark_job_failed(job_id, exc)
 
-        update_job_progress(job_id, 80)
 
-        if s3_video_url:
-            results["video_url"] = s3_video_url
-        elif "output_path" in results:
-            results["video_url"] = (
-                f"/outputs/{os.path.basename(results['output_path'])}"
+def process_google_drive_analysis_background(
+    job_id: str,
+    drive_file_id: str,
+    file_path: str,
+    user_id: int,
+    display_mode: str = "coach",
+    report: bool = False,
+    user_name: Optional[str] = None,
+    attempt_number: Optional[int] = None,
+    oauth_token: Optional[str] = None,
+):
+    """Process a Google Drive video: wait in queue, download stream, and run analysis."""
+    logger.info("Job %s: Waiting in queue for runner slot...", job_id)
+    with _analysis_lock:
+        try:
+            logger.info("Job %s: Downloading Google Drive video (ID: %s)", job_id, drive_file_id)
+            update_job_progress(job_id, 3)
+            from services.google_drive import download_drive_file
+            download_drive_file(
+                file_id=drive_file_id,
+                destination_path=file_path,
+                oauth_token=oauth_token,
             )
+            update_job_progress(job_id, 10)
 
-        if s3_report_url:
-            results["report_url"] = s3_report_url
-        elif "report_path" in results:
-            results["report_url"] = (
-                f"/outputs/{os.path.basename(results['report_path'])}"
+            _run_pipeline_after_download(
+                job_id=job_id,
+                file_path=file_path,
+                user_id=user_id,
+                display_mode=display_mode,
+                report=report,
+                user_name=user_name,
+                attempt_number=attempt_number,
             )
-
-        analysis_values = _build_analysis_record(
-            file_path=file_path,
-            user_id=user_id,
-            attempt_number=attempt_number,
-            display_mode=display_mode,
-            results=results,
-            s3_uploads=s3_uploads,
-            s3_enabled=s3_enabled,
-            s3_report_url=s3_report_url,
-        )
-
-        logger.info("Job %s: Saving to database", job_id)
-        timeline_values = results.get("analysis_timeline")
-        analysis_id = _save_completed_analysis(
-            job_id,
-            analysis_values,
-            timeline_values=timeline_values,
-        )
-        logger.info(
-            "Job %s: Completed successfully as analysis %s",
-            job_id,
-            analysis_id,
-        )
-
-    except Exception as exc:
-        logger.error("Job %s failed: %s", job_id, exc, exc_info=True)
-        _mark_job_failed(job_id, exc)
+        except Exception as exc:
+            logger.error("Job %s failed: %s", job_id, exc, exc_info=True)
+            _mark_job_failed(job_id, exc)

@@ -70,7 +70,7 @@ TIMELINE_PARAMETER_CONFIG: Dict[str, Any] = {
                     "larger up-and-down range earns a higher score because it "
                     "shows more active pressure release and reapplication."
                 ),
-                "mapping": "5% body-height range or less = 60; 12% or more = 240",
+                "mapping": "2% body-height range or less = 60; 14% or more = 240",
                 "weight": "75% of Pressure",
             },
             {
@@ -78,10 +78,10 @@ TIMELINE_PARAMETER_CONFIG: Dict[str, Any] = {
                 "explanation": (
                     "As the skier moves from one side of the run to the other, "
                     "this compares the more extended knee position with the "
-                    "more flexed position. A change from 18 deg toward 40 deg "
+                    "more flexed position. A change from 8 deg toward 40 deg "
                     "earns progressively more; 45 deg reaches the maximum."
                 ),
-                "mapping": "18 deg of change or less = 60; 45 deg or more = 240",
+                "mapping": "8 deg of change or less = 60; 45 deg or more = 240",
                 "weight": "25% of Pressure",
             },
         ],

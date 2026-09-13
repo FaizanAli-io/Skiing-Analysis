@@ -471,12 +471,135 @@ function AttemptCard({ attempt, onViewAnalysis, onArchive, onRestore, onDelete }
   );
 }
 
-function UploadAnalysisPanel({ token, clients = [], fixedUser = null, onCompleted }) {
+function extractDriveId(linkOrId) {
+  if (!linkOrId) return null;
+  const str = linkOrId.trim();
+  const matchFile = str.match(/\/file\/d\/([a-zA-Z0-9_-]+)/);
+  if (matchFile) return matchFile[1];
+  const matchId = str.match(/[?&]id=([a-zA-Z0-9_-]+)/);
+  if (matchId) return matchId[1];
+  const matchDirect = str.match(/\/d\/([a-zA-Z0-9_-]+)/);
+  if (matchDirect) return matchDirect[1];
+  if (/^[a-zA-Z0-9_-]{20,60}$/.test(str)) return str;
+  return null;
+}
+
+function UploadAnalysisPanel({ token, clients = [], fixedUser = null, onCompleted, onJobQueued, onGoToQueue }) {
+  const [uploadSource, setUploadSource] = useState("local"); // "local" | "drive"
   const [uploadState, setUploadState] = useState("");
   const [uploadProgress, setUploadProgress] = useState(0); // 0-100
-  const [progressPhase, setProgressPhase] = useState(""); // 'uploading' | 'processing' | ''
+  const [progressPhase, setProgressPhase] = useState(""); // 'uploading' | 'queued' | ''
   const [uploadError, setUploadError] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [queuedJobInfo, setQueuedJobInfo] = useState(null);
+
+  // Google Drive state
+  const [driveFile, setDriveFile] = useState(null); // { id, name, size, oauthToken }
+  const [driveLinkInput, setDriveLinkInput] = useState("");
+  const [googleConfig, setGoogleConfig] = useState({ client_id: "", api_key: "", app_id: "" });
+  const [isPickerLoading, setIsPickerLoading] = useState(false);
+  const [pickerError, setPickerError] = useState("");
+
+  useEffect(() => {
+    api("/config/google-drive")
+      .then((cfg) => {
+        if (cfg) setGoogleConfig(cfg);
+      })
+      .catch(() => {});
+  }, []);
+
+  function loadGoogleScript(src) {
+    return new Promise((resolve, reject) => {
+      if (document.querySelector(`script[src="${src}"]`)) {
+        resolve();
+        return;
+      }
+      const script = document.createElement("script");
+      script.src = src;
+      script.async = true;
+      script.defer = true;
+      script.onload = () => resolve();
+      script.onerror = () => reject(new Error(`Failed to load ${src}`));
+      document.body.appendChild(script);
+    });
+  }
+
+  async function openGooglePicker() {
+    setPickerError("");
+    if (!googleConfig.client_id || !googleConfig.api_key) {
+      setPickerError(
+        "Google API credentials are not yet configured in server environment (GOOGLE_CLIENT_ID, GOOGLE_API_KEY). You can paste any shared Google Drive video link directly below instead!"
+      );
+      return;
+    }
+
+    setIsPickerLoading(true);
+    try {
+      await Promise.all([
+        loadGoogleScript("https://apis.google.com/js/api.js"),
+        loadGoogleScript("https://accounts.google.com/gsi/client"),
+      ]);
+
+      await new Promise((resolve) => window.gapi.load("picker", resolve));
+
+      const tokenClient = window.google.accounts.oauth2.initTokenClient({
+        client_id: googleConfig.client_id,
+        scope: "https://www.googleapis.com/auth/drive.readonly",
+        callback: (tokenResponse) => {
+          setIsPickerLoading(false);
+          if (tokenResponse.error !== undefined) {
+            setPickerError(`Google authorization failed: ${tokenResponse.error}`);
+            return;
+          }
+
+          const accessToken = tokenResponse.access_token;
+          const view = new window.google.picker.View(window.google.picker.ViewId.DOCS);
+          view.setMimeTypes("video/mp4,video/quicktime,video/x-msvideo,video/x-matroska,video/webm");
+
+          const picker = new window.google.picker.PickerBuilder()
+            .setAppId(googleConfig.app_id || "")
+            .setOAuthToken(accessToken)
+            .addView(view)
+            .addView(new window.google.picker.DocsUploadView())
+            .setDeveloperKey(googleConfig.api_key)
+            .setCallback((data) => {
+              if (data.action === window.google.picker.Action.PICKED) {
+                const doc = data.docs[0];
+                setDriveFile({
+                  id: doc.id,
+                  name: doc.name,
+                  size: doc.sizeBytes,
+                  oauthToken: accessToken,
+                });
+                setDriveLinkInput("");
+              }
+            })
+            .build();
+          picker.setVisible(true);
+        },
+      });
+
+      tokenClient.requestAccessToken({ prompt: "" });
+    } catch (err) {
+      setIsPickerLoading(false);
+      setPickerError(`Could not open Google Picker: ${err.message}. You can paste a direct video link below.`);
+    }
+  }
+
+  function handleAttachLink(e) {
+    if (e) e.preventDefault();
+    const id = extractDriveId(driveLinkInput);
+    if (!id) {
+      setPickerError("Could not find a valid Google Drive file ID in this link. Please check the URL.");
+      return;
+    }
+    setPickerError("");
+    setDriveFile({
+      id: id,
+      name: `Google Drive Video (${id.slice(0, 8)}...)`,
+      oauthToken: null,
+    });
+  }
 
   function uploadWithProgress(url, formData) {
     return new Promise((resolve, reject) => {
@@ -519,52 +642,59 @@ function UploadAnalysisPanel({ token, clients = [], fixedUser = null, onComplete
     });
   }
 
-  async function waitForJob(jobId) {
-    setProgressPhase("processing");
-    for (let pollCount = 0; pollCount < 120; pollCount += 1) {
-      const status = await api(`/jobs/${jobId}`, { token });
-
-      if (status.status === "completed") {
-        setUploadProgress(100);
-        setUploadState("Analysis complete!");
-        setProgressPhase("");
-        if (onCompleted) await onCompleted();
-        return;
-      }
-      if (status.status === "failed") {
-        throw new Error(`Analysis failed: ${status.error_message || "Unknown error"}`);
-      }
-
-      const p = status.progress || 0;
-      setUploadProgress(p);
-      setUploadState(`Processing video frames (${p}%)...`);
-      await new Promise((resolve) => window.setTimeout(resolve, 3000));
-    }
-
-    setUploadState("Analysis is taking longer than expected. Check back later.");
-    setProgressPhase("");
-  }
-
   async function submitUpload(event) {
     event.preventDefault();
     const formElement = event.currentTarget;
     setUploadError("");
-    setUploadState("Initiating upload...");
+    setQueuedJobInfo(null);
+    setUploadState("Initiating...");
     setUploadProgress(0);
     setProgressPhase("uploading");
     setIsSubmitting(true);
 
     try {
-      const response = await uploadWithProgress(
-        `${API_BASE}/api/analyze-premium-overlay/`,
-        new FormData(formElement)
-      );
+      let response;
+      if (uploadSource === "local") {
+        response = await uploadWithProgress(
+          `${API_BASE}/api/analyze-premium-overlay/`,
+          new FormData(formElement)
+        );
+      } else {
+        const targetFileId = driveFile?.id || extractDriveId(driveLinkInput);
+        if (!targetFileId) {
+          throw new Error("Please select a video from Google Drive or paste a valid Google Drive video link.");
+        }
+        const formData = new FormData();
+        const userId = fixedUser ? fixedUser.id : formElement.querySelector('[name="user_id"]').value;
+        const displayMode = formElement.querySelector('[name="display_mode"]').value;
+        const report = formElement.querySelector('[name="report"]')?.checked ? "true" : "false";
+
+        formData.append("user_id", userId);
+        formData.append("display_mode", displayMode);
+        formData.append("report", report);
+        formData.append("drive_file_id", targetFileId);
+        if (driveFile?.name) formData.append("file_name", driveFile.name);
+        if (driveFile?.oauthToken) formData.append("oauth_token", driveFile.oauthToken);
+
+        setUploadState("Queueing Google Drive video for download and analysis...");
+        setUploadProgress(100);
+        response = await api("/analyze-google-drive/", {
+          method: "POST",
+          token,
+          body: formData,
+        });
+      }
 
       formElement.reset();
+      setDriveFile(null);
+      setDriveLinkInput("");
+
       if (response.job_id) {
-        setUploadState("Video uploaded. Starting AI analysis...");
-        setUploadProgress(10);
-        await waitForJob(response.job_id);
+        setUploadProgress(100);
+        setProgressPhase("queued");
+        setUploadState(response.message || "Video queued for analysis!");
+        setQueuedJobInfo({ jobId: response.job_id });
+        if (onJobQueued) onJobQueued(response.job_id);
       } else {
         setUploadState("Analysis complete.");
         setUploadProgress(100);
@@ -585,6 +715,26 @@ function UploadAnalysisPanel({ token, clients = [], fixedUser = null, onComplete
     <form className="upload-panel" onSubmit={submitUpload}>
       <p className="eyebrow">New analysis</p>
       <h2>{fixedUser ? `Upload a run for ${fixedUser.name}` : "Upload client video"}</h2>
+
+      <div className="upload-source-toggle">
+        <button
+          type="button"
+          className={`upload-source-btn ${uploadSource === "local" ? "active" : ""}`}
+          onClick={() => setUploadSource("local")}
+          disabled={isSubmitting}
+        >
+          📁 Local Computer
+        </button>
+        <button
+          type="button"
+          className={`upload-source-btn ${uploadSource === "drive" ? "active" : ""}`}
+          onClick={() => setUploadSource("drive")}
+          disabled={isSubmitting}
+        >
+          ☁️ Google Drive
+        </button>
+      </div>
+
       {fixedUser ? (
         <>
           <input type="hidden" name="user_id" value={fixedUser.id} />
@@ -613,31 +763,355 @@ function UploadAnalysisPanel({ token, clients = [], fixedUser = null, onComplete
         <input type="checkbox" name="report" value="true" defaultChecked disabled={isSubmitting} />
         Generate PDF report
       </label>
-      <label>Video file</label>
-      <input type="file" name="file" accept="video/*" required disabled={isSubmitting} />
+
+      {uploadSource === "local" ? (
+        <>
+          <label>Video file</label>
+          <input type="file" name="file" accept="video/*" required disabled={isSubmitting} />
+        </>
+      ) : (
+        <div className="drive-picker-container">
+          <label>Google Drive Video</label>
+          {driveFile ? (
+            <div className="selected-drive-card">
+              <div className="selected-drive-icon">☁️</div>
+              <div className="selected-drive-info">
+                <strong>{driveFile.name}</strong>
+                <small>
+                  File ID: {driveFile.id}
+                  {driveFile.size ? ` • ${(driveFile.size / (1024 * 1024)).toFixed(1)} MB` : ""}
+                </small>
+              </div>
+              <button
+                type="button"
+                className="ghost-button"
+                onClick={() => { setDriveFile(null); setDriveLinkInput(""); }}
+              >
+                ✕ Change
+              </button>
+            </div>
+          ) : (
+            <div className="drive-selection-methods">
+              <button
+                type="button"
+                className="secondary-button gdrive-browse-btn"
+                onClick={openGooglePicker}
+                disabled={isSubmitting || isPickerLoading}
+              >
+                {isPickerLoading ? "Opening Google..." : "🔍 Browse Google Drive"}
+              </button>
+
+              <div className="drive-or-divider">
+                <span>OR PASTE DRIVE SHARE LINK</span>
+              </div>
+
+              <div className="drive-link-input-row">
+                <input
+                  type="text"
+                  placeholder="https://drive.google.com/file/d/..."
+                  value={driveLinkInput}
+                  onChange={(e) => setDriveLinkInput(e.target.value)}
+                  disabled={isSubmitting}
+                />
+                <button
+                  type="button"
+                  className="secondary-button inline-attach-btn"
+                  onClick={handleAttachLink}
+                  disabled={!driveLinkInput.trim() || isSubmitting}
+                >
+                  Attach
+                </button>
+              </div>
+              {pickerError && <p className="picker-error-note">{pickerError}</p>}
+            </div>
+          )}
+        </div>
+      )}
+
       <button className="primary-button" disabled={isSubmitting}>
         {isSubmitting
-          ? progressPhase === "uploading"
+          ? uploadSource === "local"
             ? `Uploading (${uploadProgress}%)...`
-            : `Processing (${uploadProgress}%)...`
-          : "Run analysis"}
+            : "Queueing Drive Video..."
+          : uploadSource === "local"
+            ? "Upload to Queue"
+            : "Queue Google Drive Video"}
       </button>
 
-      {isSubmitting && uploadProgress > 0 && (
+      {isSubmitting && uploadProgress > 0 && uploadSource === "local" && (
         <div className="upload-progress-container">
           <div className="upload-progress-track">
             <div className="upload-progress-fill" style={{ width: `${uploadProgress}%` }} />
           </div>
           <div className="upload-progress-meta">
-            <span>{progressPhase === "uploading" ? "File transfer" : "AI video analysis"}</span>
+            <span>Transferring video to server</span>
             <span>{uploadProgress}%</span>
           </div>
         </div>
       )}
 
+      {queuedJobInfo && (
+        <div className="upload-queued-banner">
+          <div className="queued-banner-content">
+            <strong>Video queued for processing!</strong>
+            <p>
+              The video was registered and placed into the sequential queue.
+              You can immediately upload another video, or monitor live progress in the <strong>Upload Progress</strong> tab.
+            </p>
+          </div>
+          <div className="queued-banner-actions">
+            {onGoToQueue && (
+              <button type="button" className="secondary-button" onClick={onGoToQueue}>
+                View Upload Progress ➔
+              </button>
+            )}
+            <button type="button" className="ghost-button" onClick={() => setQueuedJobInfo(null)}>
+              Dismiss
+            </button>
+          </div>
+        </div>
+      )}
+
       {uploadError && <div className="alert">{uploadError}</div>}
-      {uploadState && <p className="status-text">{uploadState}</p>}
+      {uploadState && !queuedJobInfo && <p className="status-text">{uploadState}</p>}
     </form>
+  );
+}
+
+function UploadQueuePanel({ jobs = [], token, onRefresh, onViewAnalysis, onNavigateUpload }) {
+  const [clearing, setClearing] = useState(false);
+
+  const activeJobs = jobs
+    .filter((j) => j.status === "processing")
+    .sort((a, b) => new Date(a.started_at || a.created_at) - new Date(b.started_at || b.created_at));
+  const queuedJobs = jobs
+    .filter((j) => j.status === "pending")
+    .sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+  const completedJobs = jobs
+    .filter((j) => j.status === "completed")
+    .sort((a, b) => new Date(b.completed_at || b.created_at) - new Date(a.completed_at || a.created_at));
+  const failedJobs = jobs
+    .filter((j) => j.status === "failed")
+    .sort((a, b) => new Date(b.completed_at || b.created_at) - new Date(a.completed_at || a.created_at));
+
+  async function handleClearQueue() {
+    const confirmed = window.confirm(
+      "Are you sure you want to clear all active and queued videos from the processing queue?"
+    );
+    if (!confirmed) return;
+    setClearing(true);
+    try {
+      await api("/jobs/clear-queue", { method: "POST", token });
+      await onRefresh();
+    } catch (err) {
+      alert(`Failed to clear queue: ${err.message}`);
+    } finally {
+      setClearing(false);
+    }
+  }
+
+  async function handleDeleteJob(jobId) {
+    try {
+      await api(`/jobs/${jobId}`, { method: "DELETE", token });
+      await onRefresh();
+    } catch (err) {
+      alert(`Failed to remove job: ${err.message}`);
+    }
+  }
+
+  return (
+    <section className="queue-workspace">
+      <div className="section-heading">
+        <div>
+          <p className="eyebrow">Processing Engine</p>
+          <h2>Upload & Processing Progress</h2>
+          <p>
+            Videos are analyzed sequentially to prevent server overload. When multiple videos are submitted, they queue in line.
+          </p>
+        </div>
+        <div className="queue-heading-actions">
+          {(activeJobs.length > 0 || queuedJobs.length > 0) && (
+            <button
+              type="button"
+              className="danger-button inline-btn"
+              onClick={handleClearQueue}
+              disabled={clearing}
+            >
+              {clearing ? "Clearing..." : "Clear Queue"}
+            </button>
+          )}
+          {onNavigateUpload && (
+            <button type="button" className="primary-button inline-btn" onClick={onNavigateUpload}>
+              + Upload Another Video
+            </button>
+          )}
+          <button type="button" className="secondary-button inline-btn" onClick={onRefresh}>
+            Refresh Queue
+          </button>
+        </div>
+      </div>
+
+      <div className="queue-overview-stats">
+        <div className="queue-stat-card">
+          <span>Active</span>
+          <strong className={activeJobs.length > 0 ? "highlight-active" : ""}>{activeJobs.length}</strong>
+        </div>
+        <div className="queue-stat-card">
+          <span>In Queue</span>
+          <strong className={queuedJobs.length > 0 ? "highlight-queue" : ""}>{queuedJobs.length}</strong>
+        </div>
+        <div className="queue-stat-card">
+          <span>Completed</span>
+          <strong>{completedJobs.length}</strong>
+        </div>
+      </div>
+
+      <div className="queue-cards-section">
+        <h3 className="queue-section-title">Active & Queued Tasks</h3>
+        {activeJobs.length === 0 && queuedJobs.length === 0 ? (
+          <div className="empty-state queue-empty-card">
+            <p>No videos currently processing. All uploaded runs have finished analysis.</p>
+            {onNavigateUpload && (
+              <button type="button" className="secondary-button" style={{ marginTop: '14px' }} onClick={onNavigateUpload}>
+                Upload a client video
+              </button>
+            )}
+          </div>
+        ) : (
+          <div className="queue-active-grid">
+            {activeJobs.map((job) => (
+              <div className="queue-card active-job-card" key={job.job_id}>
+                <div className="queue-card-header">
+                  <span className="queue-status-badge processing">
+                    <span className="pulse-dot" /> Analyzing Video
+                  </span>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <span className="queue-display-mode">{job.display_mode === "athlete" ? "Athlete Mode" : "Coach Mode"}</span>
+                    <button
+                      type="button"
+                      className="ghost-button"
+                      title="Cancel and remove this job"
+                      onClick={() => handleDeleteJob(job.job_id)}
+                    >
+                      ✕
+                    </button>
+                  </div>
+                </div>
+                <div className="queue-card-body">
+                  <h4>{job.file_name}</h4>
+                  <p className="queue-client-name">
+                    Client: <strong>{job.person_name || `Client #${job.person_id}`}</strong>
+                  </p>
+                  
+                  <div className="queue-progress-bar-wrap">
+                    <div className="queue-progress-bar-track">
+                      <div
+                        className="queue-progress-bar-fill animated"
+                        style={{ width: `${Math.max(10, job.progress || 10)}%` }}
+                      />
+                    </div>
+                    <div className="queue-progress-bar-labels">
+                      <span>{job.progress <= 65 ? "Processing video frames..." : job.progress <= 80 ? "Uploading assets..." : "Finalizing analysis..."}</span>
+                      <strong>{job.progress}%</strong>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            ))}
+
+            {queuedJobs.map((job, idx) => (
+              <div className="queue-card queued-job-card" key={job.job_id}>
+                <div className="queue-card-header">
+                  <span className="queue-status-badge queued">
+                    ⏳ #{idx + 1} in queue
+                  </span>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <span className="queue-time-ago">{formatDate(job.created_at)}</span>
+                    <button
+                      type="button"
+                      className="ghost-button"
+                      title="Cancel this queued job"
+                      onClick={() => handleDeleteJob(job.job_id)}
+                    >
+                      ✕ Cancel
+                    </button>
+                  </div>
+                </div>
+                <div className="queue-card-body">
+                  <h4>{job.file_name}</h4>
+                  <p className="queue-client-name">
+                    Client: <strong>{job.person_name || `Client #${job.person_id}`}</strong>
+                  </p>
+                  <p className="queue-wait-note">
+                    Waiting for current video to finish. Will begin automatically once the slot is free.
+                  </p>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {(completedJobs.length > 0 || failedJobs.length > 0) && (
+        <div className="queue-history-section">
+          <h3 className="queue-section-title">Recent Queue Activity</h3>
+          <div className="queue-history-list">
+            {failedJobs.map((job) => (
+              <div className="queue-history-item failed" key={job.job_id}>
+                <div className="queue-history-info">
+                  <span className="queue-status-badge failed">Failed</span>
+                  <strong>{job.file_name}</strong>
+                  <span>Client: {job.person_name || `Client #${job.person_id}`}</span>
+                  <small className="error-text">{job.error_message || "Analysis failed"}</small>
+                </div>
+                <div className="queue-history-meta">
+                  <small>{formatDate(job.completed_at || job.created_at)}</small>
+                  <button
+                    type="button"
+                    className="ghost-button"
+                    title="Remove from history"
+                    onClick={() => handleDeleteJob(job.job_id)}
+                  >
+                    ✕
+                  </button>
+                </div>
+              </div>
+            ))}
+
+            {completedJobs.slice(0, 8).map((job) => (
+              <div className="queue-history-item completed" key={job.job_id}>
+                <div className="queue-history-info">
+                  <span className="queue-status-badge completed">Completed</span>
+                  <strong>{job.file_name}</strong>
+                  <span>Client: {job.person_name || `Client #${job.person_id}`}</span>
+                  <small>{job.display_mode === "athlete" ? "Athlete Mode" : "Coach Mode"}</small>
+                </div>
+                <div className="queue-history-meta">
+                  <small>{formatDate(job.completed_at || job.created_at)}</small>
+                  {job.video_analysis_id && onViewAnalysis && (
+                    <button
+                      type="button"
+                      className="text-button"
+                      onClick={() => onViewAnalysis({ id: job.video_analysis_id })}
+                    >
+                      View Graph ➔
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    className="ghost-button"
+                    title="Remove from history"
+                    onClick={() => handleDeleteJob(job.job_id)}
+                  >
+                    ✕
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </section>
   );
 }
 
@@ -959,6 +1433,7 @@ function AdminDashboard() {
   const [attempts, setAttempts] = useState([]);
   const [attemptsLoading, setAttemptsLoading] = useState(false);
   const [leaderboards, setLeaderboards] = useState({});
+  const [jobs, setJobs] = useState([]);
   const [adminView, setAdminView] = useState("upload");
   const [displayCount, setDisplayCount] = useState(12); // Show 12 initially to fill widescreen area
   const [showArchived, setShowArchived] = useState(false);
@@ -966,20 +1441,31 @@ function AdminDashboard() {
   const [error, setError] = useState("");
   const [graphAttempt, setGraphAttempt] = useState(null);
 
+  async function loadJobs() {
+    try {
+      const jobRows = await api("/jobs/", { token });
+      setJobs(Array.isArray(jobRows) ? jobRows : []);
+    } catch {
+      // ignore network blips
+    }
+  }
+
   async function loadData() {
     setAttemptsLoading(true);
     try {
       const attemptsUrl = showArchived
         ? "/admin/attempts?limit=100&only_archived=true"
         : "/admin/attempts?limit=100";
-      const [userRows, attemptRows, leaderboardRows] = await Promise.all([
+      const [userRows, attemptRows, leaderboardRows, jobRows] = await Promise.all([
         api("/admin/users?limit=1000", { token }),
         api(attemptsUrl, { token }),
         api("/admin/leaderboards?limit=50", { token }),
+        api("/jobs/", { token }).catch(() => []),
       ]);
       setUsers(userRows);
       setAttempts(attemptRows);
       setLeaderboards(leaderboardRows.leaderboards || {});
+      setJobs(Array.isArray(jobRows) ? jobRows : []);
     } finally {
       setAttemptsLoading(false);
     }
@@ -989,12 +1475,14 @@ function AdminDashboard() {
     const attemptsUrl = showArchived
       ? "/admin/attempts?limit=100&only_archived=true"
       : "/admin/attempts?limit=100";
-    const [attemptRows, leaderboardRows] = await Promise.all([
+    const [attemptRows, leaderboardRows, jobRows] = await Promise.all([
       api(attemptsUrl, { token }),
       api("/admin/leaderboards?limit=50", { token }),
+      api("/jobs/", { token }).catch(() => []),
     ]);
     setAttempts(attemptRows);
     setLeaderboards(leaderboardRows.leaderboards || {});
+    setJobs(Array.isArray(jobRows) ? jobRows : []);
   }
 
   async function handleArchive(attempt) {
@@ -1036,6 +1524,20 @@ function AdminDashboard() {
     }
     loadData().catch((err) => setError(err.message));
   }, [token, showArchived]);
+
+  const activeJobsCount = jobs.filter((j) => j.status === "processing" || j.status === "pending").length;
+
+  useEffect(() => {
+    if (!token) return;
+    const intervalTime = activeJobsCount > 0 ? 2500 : 8000;
+    const interval = setInterval(() => {
+      loadJobs();
+      if (activeJobsCount > 0) {
+        loadActivity();
+      }
+    }, intervalTime);
+    return () => clearInterval(interval);
+  }, [token, activeJobsCount]);
 
   useAutoRefresh(loadActivity, Boolean(token));
 
@@ -1079,6 +1581,17 @@ function AdminDashboard() {
         </button>
         <button
           type="button"
+          className={adminView === "queue" ? "active" : ""}
+          aria-current={adminView === "queue" ? "page" : undefined}
+          onClick={() => setAdminView("queue")}
+        >
+          Upload Progress
+          {activeJobsCount > 0 && (
+            <span className="tab-pill-badge pulsing">{activeJobsCount}</span>
+          )}
+        </button>
+        <button
+          type="button"
           className={adminView === "leaderboards" ? "active" : ""}
           aria-current={adminView === "leaderboards" ? "page" : undefined}
           onClick={() => setAdminView("leaderboards")}
@@ -1098,7 +1611,16 @@ function AdminDashboard() {
       {adminView === "upload" && (
         <>
           <section className="upload-workspace">
-            <UploadAnalysisPanel token={token} clients={clients} onCompleted={loadActivity} />
+            <UploadAnalysisPanel
+              token={token}
+              clients={clients}
+              onCompleted={loadActivity}
+              onJobQueued={() => {
+                loadJobs();
+                loadActivity();
+              }}
+              onGoToQueue={() => setAdminView("queue")}
+            />
           </section>
 
           <section className="section-block">
@@ -1154,6 +1676,16 @@ function AdminDashboard() {
             )}
           </section>
         </>
+      )}
+
+      {adminView === "queue" && (
+        <UploadQueuePanel
+          jobs={jobs}
+          token={token}
+          onRefresh={loadJobs}
+          onViewAnalysis={setGraphAttempt}
+          onNavigateUpload={() => setAdminView("upload")}
+        />
       )}
 
       {adminView === "leaderboards" && <LeaderboardPanel leaderboards={leaderboards} />}
