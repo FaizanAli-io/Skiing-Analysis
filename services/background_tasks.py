@@ -372,6 +372,22 @@ def _run_pipeline_after_download(
         analysis_id,
     )
 
+    # Clean up local disk files to prevent server disk from filling up
+    try:
+        # Always remove the temporary input video (analysis is finished)
+        if file_path and os.path.exists(file_path):
+            os.remove(file_path)
+            logger.info("Job %s: Cleaned up temporary input file %s", job_id, file_path)
+
+        # If S3 is enabled, remove local output copies since they are safely stored in S3
+        if s3_enabled and s3_video_url:
+            for p in [results.get("output_path"), results.get("report_path"), results.get("snapshot_path")]:
+                if p and os.path.exists(p):
+                    os.remove(p)
+                    logger.info("Job %s: Cleaned up local copy %s (saved in S3)", job_id, p)
+    except Exception as cleanup_err:
+        logger.warning("Job %s: Non-fatal error during file cleanup: %s", job_id, cleanup_err)
+
 
 def process_video_analysis_background(
     job_id: str,
