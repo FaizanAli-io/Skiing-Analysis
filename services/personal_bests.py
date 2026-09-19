@@ -339,6 +339,8 @@ def enrich_attempts(db, attempts: Sequence[VideoAnalysis]) -> Sequence[VideoAnal
     if not person_ids:
         return attempts
 
+    persons = {p.id: p.name for p in db.query(Person).filter(Person.id.in_(person_ids)).all()}
+
     histories = (
         _completed_attempts_query(db)
         .filter(VideoAnalysis.person_id.in_(person_ids))
@@ -357,6 +359,9 @@ def enrich_attempts(db, attempts: Sequence[VideoAnalysis]) -> Sequence[VideoAnal
         history = calculated.get(int(attempt.person_id or 0), {})
         attempt_id = int(attempt.id)
         metadata = history.get("metadata_by_attempt", {}).get(attempt_id, {})
+        client_name = persons.get(attempt.person_id) or (attempt.person.name if attempt.person else None)
+        setattr(attempt, "person_name", client_name)
+        setattr(attempt, "client_name", client_name)
         setattr(
             attempt,
             "personal_best_comparisons",

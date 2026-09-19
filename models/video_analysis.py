@@ -41,3 +41,24 @@ class VideoAnalysis(Base):
         cascade="all, delete-orphan",
         passive_deletes=True,
     )
+
+    @property
+    def person_name(self):
+        if hasattr(self, "_person_name") and self._person_name is not None:
+            return self._person_name
+        return self.person.name if self.person else None
+
+    @person_name.setter
+    def person_name(self, value):
+        self._person_name = value
+
+    @property
+    def client_name(self):
+        if hasattr(self, "_client_name") and self._client_name is not None:
+            return self._client_name
+        return self.person.name if self.person else None
+
+    @client_name.setter
+    def client_name(self, value):
+        self._client_name = value
+

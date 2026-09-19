@@ -288,6 +288,7 @@ def _run_pipeline_after_download(
     report: bool = False,
     user_name: Optional[str] = None,
     attempt_number: Optional[int] = None,
+    rotation_override: Optional[int] = None,
 ):
     """Core analysis, S3 upload, and DB commit pipeline."""
     logger.info("Starting analysis for job %s", job_id)
@@ -314,6 +315,7 @@ def _run_pipeline_after_download(
         session_number=personal_best_context["session_number"],
         previous_personal_bests=personal_best_context["personal_bests"],
         progress_callback=lambda p: update_job_progress(job_id, p),
+        rotation_override=rotation_override,
     )
 
     update_job_progress(job_id, 70)
@@ -397,6 +399,7 @@ def process_video_analysis_background(
     report: bool = False,
     user_name: Optional[str] = None,
     attempt_number: Optional[int] = None,
+    rotation_override: Optional[int] = None,
 ):
     """Process one video without holding a DB session during long work."""
     logger.info("Job %s: Waiting in queue for runner slot...", job_id)
@@ -410,6 +413,7 @@ def process_video_analysis_background(
                 report=report,
                 user_name=user_name,
                 attempt_number=attempt_number,
+                rotation_override=rotation_override,
             )
         except Exception as exc:
             logger.error("Job %s failed: %s", job_id, exc, exc_info=True)

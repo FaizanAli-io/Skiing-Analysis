@@ -195,6 +195,7 @@ async def analyze_ski_video_premium_overlay(
     user_id: int = Form(...),
     display_mode: str = Form("athlete"),
     report: bool = Form(False),
+    rotation: Optional[str] = Form(None),
     file: UploadFile = File(...),
     current_admin: Person = Depends(require_admin),
 ):
@@ -202,6 +203,14 @@ async def analyze_ski_video_premium_overlay(
     Upload a video for background processing.
     Returns immediately with a job_id to track progress.
     """
+    # Safely parse optional rotation string ("-90", "90", "180", "0", or empty/null)
+    rotation_override: Optional[int] = None
+    if rotation is not None and str(rotation).strip() not in ("", "null", "undefined", "none"):
+        try:
+            rotation_override = int(rotation)
+        except (ValueError, TypeError):
+            rotation_override = None
+
     # Validate user exists
     read_db = SessionLocal()
     try:
@@ -247,7 +256,8 @@ async def analyze_ski_video_premium_overlay(
         display_mode=display_mode,
         report=report,
         user_name=user_name,
-        attempt_number=attempt_number
+        attempt_number=attempt_number,
+        rotation_override=rotation_override,
     )
     
     return {

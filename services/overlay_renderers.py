@@ -914,35 +914,40 @@ def create_premium_overlay(
 
 
 
-    # Blue IQ card
+    # Blue IQ card (Clean single-row layout without stage text)
     IQ_H = 74
     draw.rounded_rectangle((panel_x, y, panel_x+panel_w, y+IQ_H),
                             radius=14, fill=C["card"], outline=C["border"], width=1)
-    draw.text((panel_x+16, y+10), "Blue IQ", fill=C["blue"], font=F["iq_label"])
-    level_info = _blueiq_level_info(blue_iq)
-    draw.text((panel_x+16, y+36), f"Stage: {level_info['stage']}", fill=C["muted"], font=F["iq_sublabel"])
 
     display_blue_iq = int(round(_clamp_score(blue_iq)))
+    level_info = _blueiq_level_info(blue_iq)
+    tier_txt  = level_info["label"].upper()
+    tier_col  = _tcolor(display_blue_iq)
+
+    # Left: "Blue IQ" title
+    draw.text((panel_x + 18, y + 26), "Blue IQ", fill=C["blue"], font=F["iq_label"])
+
+    # Right: Level Tier Pill Badge
+    iq_tag_w = max(100, int(draw.textlength(tier_txt, font=F["iq_tier"]) + 22))
+    iq_tag_h = 26
+    iq_tag_x = panel_x + panel_w - iq_tag_w - 14
+    iq_tag_y = y + (IQ_H - iq_tag_h) // 2
+    draw.rounded_rectangle((iq_tag_x, iq_tag_y, iq_tag_x + iq_tag_w, iq_tag_y + iq_tag_h),
+                            radius=13, fill=(20, 36, 58), outline=tier_col, width=1)
+    tw = draw.textlength(tier_txt, font=F["iq_tier"])
+    draw.text((iq_tag_x + (iq_tag_w - tw) / 2, iq_tag_y + 6), tier_txt, fill=tier_col, font=F["iq_tier"])
+
+    # Middle: Score (hero 52pt font) + /240
     score_str = f"{display_blue_iq}"
     sw = draw.textlength(score_str, font=F["iq_score"])
     denom = f"/{MAX_BLUE_SCORE}"
     denom_w = draw.textlength(denom, font=F["score_den"])
-    tier_txt  = level_info["label"].upper()
-    tier_col  = _tcolor(display_blue_iq)
 
-    iq_tag_w = max(100, int(draw.textlength(tier_txt, font=F["iq_tier"]) + 24))
-    iq_tag_h = 24
-    iq_tag_x = panel_x + panel_w - iq_tag_w - 12
-    iq_tag_y = y + 28
-
-    score_right = iq_tag_x - 12
+    score_right = iq_tag_x - 14
     denom_x = score_right - denom_w
-    draw.text((denom_x - sw - 3, y + 4), score_str, fill=C["text"], font=F["iq_score"])
-    draw.text((denom_x, y + 39), denom, fill=C["muted"], font=F["score_den"])
-    draw.rounded_rectangle((iq_tag_x, iq_tag_y, iq_tag_x+iq_tag_w, iq_tag_y+iq_tag_h),
-                            radius=11, fill=(20,36,58), outline=tier_col, width=1)
-    tw = draw.textlength(tier_txt, font=F["iq_tier"])
-    draw.text((iq_tag_x + (iq_tag_w - tw)/2, iq_tag_y + 5), tier_txt, fill=tier_col, font=F["iq_tier"])
+    score_x = denom_x - sw - 4
+    draw.text((score_x, y + 9), score_str, fill=C["text"], font=F["iq_score"])
+    draw.text((denom_x, y + 36), denom, fill=C["muted"], font=F["score_den"])
 
     y += IQ_H + 8
 

@@ -10,10 +10,10 @@ from services.report_generator import (
 
 PILLARS = ("pressure", "balance", "rotation", "edging")
 BAND_SCORES = {
-    "emerging": 83,
-    "developing": 145,
-    "proficient": 185,
-    "excellent": 215,
+    "building": 83,
+    "progressing": 145,
+    "advancing": 185,
+    "mastering": 215,
 }
 
 
@@ -76,8 +76,8 @@ class FixedReportNarrativeTests(unittest.TestCase):
         ])
 
         self.assertIn("establishes a Blue IQ baseline of 80/240", sections["overall"])
-        self.assertIn("Balance is emerging", sections["pillars"]["balance"]["summary"])
-        self.assertIn("Rotational control is emerging", sections["pillars"]["rotation"]["summary"])
+        self.assertIn("Balance is building", sections["pillars"]["balance"]["summary"])
+        self.assertIn("Rotational control is building", sections["pillars"]["rotation"]["summary"])
         self.assertIsNone(BASELINE_COMPARISON_PATTERN.search(narrative))
 
     def test_new_personal_best_language_requires_recorded_comparison_status(self):

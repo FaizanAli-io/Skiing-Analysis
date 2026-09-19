@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from typing import Dict, List, Optional
 from datetime import datetime
 
@@ -26,6 +26,11 @@ class VideoAnalysisCreate(BaseModel):
     is_archived: Optional[bool] = False
     timestamp: Optional[datetime] = None
 
+    @field_validator("is_archived", mode="before")
+    @classmethod
+    def coerce_archived_create(cls, v):
+        return bool(v) if v is not None else False
+
 class VideoAnalysisOut(VideoAnalysisCreate):
     id: int
     is_archived: bool = False
@@ -34,8 +39,15 @@ class VideoAnalysisOut(VideoAnalysisCreate):
     session_date: Optional[str] = None
     session_number: Optional[int] = None
     run_number: Optional[int] = None
+    person_name: Optional[str] = None
+    client_name: Optional[str] = None
     personal_best_comparisons: Dict[str, ScoreComparison] = Field(default_factory=dict)
     new_personal_bests: List[str] = Field(default_factory=list)
+
+    @field_validator("is_archived", mode="before")
+    @classmethod
+    def coerce_archived_out(cls, v):
+        return bool(v) if v is not None else False
 
     class Config:
         from_attributes = True

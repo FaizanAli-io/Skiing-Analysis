@@ -871,17 +871,35 @@ def _draw_header(canvas: Image.Image, draw, fonts: Dict[str, Any], logo_path: st
     scores = payload["final_scores"]
     blue_iq = scores["blue_iq"]
     color = _score_color(blue_iq)
-    draw.rounded_rectangle((865, 58, 1215, 238), radius=28, fill=(10, 24, 42), outline=(34, 69, 110), width=2)
-    draw.text((905, 88), "BLUE IQ", fill=colors["blue"], font=fonts["small_bold"])
-    draw.text((905, 122), f"{blue_iq:.0f}", fill=colors["text"], font=fonts["score"])
-    draw.text((1032, 160), f"/ {MAX_SCORE}", fill=colors["muted"], font=fonts["body_bold"])
-    _draw_badge(draw, _score_band(blue_iq).upper(), 905, 190, color, fonts["tiny_bold"])
+    card_x1, card_y1, card_x2, card_y2 = 860, 52, 1215, 252
+    draw.rounded_rectangle((card_x1, card_y1, card_x2, card_y2), radius=26, fill=(10, 24, 42), outline=(34, 69, 110), width=2)
+
+    pad_x = card_x1 + 32
+    right_x = card_x2 - 32
+
+    # Row 1: Header - Metric label on left, personal best status on right
+    draw.text((pad_x, 76), "BLUE IQ", fill=colors["blue"], font=fonts["small_bold"])
+
     comparison = payload.get("personal_best_comparisons", {}).get("blue_iq")
     if comparison and comparison.get("is_new_personal_best"):
-        _draw_badge(draw, "NEW PB", 1055, 84, (34, 197, 94), fonts["tiny_bold"])
-    compact_text = _compact_personal_best_text(comparison)
-    if compact_text:
-        draw.text((1040, 202), compact_text, fill=(165, 181, 204), font=fonts["micro_bold"])
+        pb_badge = "NEW PB"
+        badge_w = _text_width(draw, pb_badge, fonts["tiny_bold"]) + 30
+        _draw_badge(draw, pb_badge, right_x - badge_w, 68, (34, 197, 94), fonts["tiny_bold"])
+    else:
+        compact_text = _compact_personal_best_text(comparison)
+        if compact_text:
+            text_w = _text_width(draw, compact_text, fonts["micro_bold"])
+            draw.text((right_x - text_w, 78), compact_text, fill=(165, 181, 204), font=fonts["micro_bold"])
+
+    # Row 2: Large score + dynamic / 240 (62pt hero font)
+    score_str = f"{blue_iq:.0f}"
+    draw.text((pad_x, 108), score_str, fill=colors["text"], font=fonts["score"])
+    score_w = _text_width(draw, score_str, fonts["score"])
+    draw.text((pad_x + score_w + 10, 138), f"/ {MAX_SCORE}", fill=colors["muted"], font=fonts["body_bold"])
+
+    # Row 3: Achievement Level Badge (clean, isolated on its own row)
+    badge_text = _score_band(blue_iq).upper()
+    _draw_badge(draw, badge_text, pad_x, 186, color, fonts["tiny_bold"])
 
 
 def _draw_pillar_card(
@@ -904,7 +922,9 @@ def _draw_pillar_card(
         _draw_badge(draw, "NEW PB", x + 155, y + 24, (34, 197, 94), fonts["tiny_bold"])
     draw.text((x + w - 178, y + 25), f"{score:.0f}", fill=(238, 246, 255), font=fonts["metric_score"])
     draw.text((x + w - 88, y + 40), f"/ {MAX_SCORE}", fill=(165, 181, 204), font=fonts["small_bold"])
-    _draw_badge(draw, _score_band(score).upper(), x + w - 184, y + 74, color, fonts["tiny_bold"])
+    pillar_badge_text = _score_band(score).upper()
+    pillar_badge_w = _text_width(draw, pillar_badge_text, fonts["tiny_bold"]) + 34
+    _draw_badge(draw, pillar_badge_text, x + w - 28 - pillar_badge_w, y + 74, color, fonts["tiny_bold"])
     _draw_score_bar(draw, x + 28, y + 90, w - 220, score, color)
 
     comparison_text = _personal_best_context_text(comparison)

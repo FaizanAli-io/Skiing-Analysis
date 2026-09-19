@@ -150,19 +150,31 @@ def _head_to_toe_orientation_score(landmarks) -> Optional[float]:
 
 
 def _orientation_sample_frames(capture, total_frames: int) -> List[np.ndarray]:
-    if total_frames <= 0:
-        return []
-
-    frame_indexes = sorted({
-        min(total_frames - 1, max(0, int(round((total_frames - 1) * ratio))))
-        for ratio in ORIENTATION_SAMPLE_RATIOS
-    })
     frames = []
-    for frame_index in frame_indexes:
-        capture.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
-        success, frame = capture.read()
-        if success and frame is not None and frame.size:
-            frames.append(frame)
+    if total_frames > 0:
+        frame_indexes = sorted({
+            min(total_frames - 1, max(0, int(round((total_frames - 1) * ratio))))
+            for ratio in ORIENTATION_SAMPLE_RATIOS
+        })
+        for frame_index in frame_indexes:
+            capture.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
+            success, frame = capture.read()
+            if success and frame is not None and frame.size:
+                frames.append(frame)
+
+    # Fallback: if seeking returned no/few frames (common on smartphone MP4/MOV files)
+    if len(frames) < 2:
+        capture.set(cv2.CAP_PROP_POS_FRAMES, 0)
+        frames = []
+        for i in range(60):
+            success, frame = capture.read()
+            if not success or frame is None or not frame.size:
+                break
+            if i % 12 == 0:
+                frames.append(frame)
+            if len(frames) >= 5:
+                break
+
     return frames
 
 
@@ -173,21 +185,43 @@ def _detect_upright_rotation(
     target_width: int,
     target_height: int,
 ) -> Tuple[int, float, Dict[int, Dict[str, float]]]:
-    """Choose the rotation with the largest valid head-to-toe vertical gap."""
+    """Choose the rotation with the largest valid head-to-toe vertical gap.
+    Guarantees horizontal (landscape) orientation for ski analysis."""
     metadata_rotation = _capture_rotation_metadata(capture)
     sample_frames = _orientation_sample_frames(capture, total_frames)
+
+    # Determine if input is portrait (height > width)
+    is_portrait = False
+    if sample_frames:
+        h, w = sample_frames[0].shape[:2]
+        is_portrait = h > w
+    else:
+        cw = capture.get(cv2.CAP_PROP_FRAME_WIDTH)
+        ch = capture.get(cv2.CAP_PROP_FRAME_HEIGHT)
+        if ch > cw and ch > 0:
+            is_portrait = True
+
+    # "Always Horizontal" rule:
+    # Ski simulators and slopes are horizontal (landscape). If a video was
+    # filmed in portrait (height > width), candidate angles are strictly (-90, 90)
+    # to guarantee the analyzed and rendered video is horizontal widescreen.
+    if is_portrait:
+        candidate_angles = (-90, 90)
+    else:
+        candidate_angles = ORIENTATION_ANGLES
+
     candidate_scores: Dict[int, List[float]] = {
-        angle: [] for angle in ORIENTATION_ANGLES
+        angle: [] for angle in candidate_angles
     }
 
     orientation_pose = mp_pose.Pose(
         static_image_mode=True,
         model_complexity=1,
-        min_detection_confidence=0.40,
+        min_detection_confidence=0.35,
     )
     try:
         for sample_frame in sample_frames:
-            for angle in ORIENTATION_ANGLES:
+            for angle in candidate_angles:
                 rotated_frame = rotate_frame(sample_frame, angle)
                 normalized_frame, _, _ = resize_and_center_frame(
                     rotated_frame,
@@ -221,6 +255,10 @@ def _detect_upright_rotation(
         }
 
     if not summaries:
+        # Fallback when landmarks were inconclusive
+        if is_portrait:
+            default_portrait_angle = metadata_rotation if metadata_rotation in (-90, 90) else -90
+            return default_portrait_angle, 0.0, summaries
         return metadata_rotation, 0.0, summaries
 
     selected_angle = max(
@@ -285,6 +323,7 @@ def analyze_video(
     session_number: Optional[int] = None,
     previous_personal_bests: Optional[Dict[str, Any]] = None,
     progress_callback: Optional[Callable[[int], None]] = None,
+    rotation_override: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Analyze ski video and return performance metrics"""
     _reset_frame_metrics_log()
@@ -473,24 +512,28 @@ def analyze_video(
         last_report_frame = None
         last_emitted_pct = 10
 
-        # Detect one stable orientation before any analysis. Candidate rotations
-        # are scored over several frames by their positive head-to-toe Y gap.
-        logger.info("Detecting upright video rotation from head-to-toe distance...")
+        # Detect upright orientation before analysis, or use manual override if specified.
         detected_angle = 0
         best_score = 0.0
         orientation_summaries: Dict[int, Dict[str, float]] = {}
-        try:
-            detected_angle, best_score, orientation_summaries = (
-                _detect_upright_rotation(
-                    cap,
-                    total_frames,
-                    mp_pose,
-                    TARGET_WIDTH,
-                    TARGET_HEIGHT,
+
+        if rotation_override is not None:
+            detected_angle = _normalize_right_angle(rotation_override)
+            logger.info("Using manual rotation override: %d°", detected_angle)
+        else:
+            logger.info("Detecting upright video rotation from head-to-toe distance...")
+            try:
+                detected_angle, best_score, orientation_summaries = (
+                    _detect_upright_rotation(
+                        cap,
+                        total_frames,
+                        mp_pose,
+                        TARGET_WIDTH,
+                        TARGET_HEIGHT,
+                    )
                 )
-            )
-        except Exception as e:
-            logger.error(f"Error during rotation detection: {e}")
+            except Exception as e:
+                logger.error(f"Error during rotation detection: {e}")
 
         # Close test capture and open fresh for main processing
         cap.release()

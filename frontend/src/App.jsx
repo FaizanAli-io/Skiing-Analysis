@@ -135,6 +135,13 @@ function clearToken(kind = "client") {
   localStorage.removeItem(kind === "admin" ? "bluerun_admin_token" : "bluerun_client_token");
 }
 
+function handleAuthExpired(isAdmin = false) {
+  clearToken("admin");
+  clearToken("client");
+  const isCurrentlyAdmin = isAdmin || window.location.pathname.startsWith("/admin");
+  routeTo(isCurrentlyAdmin ? "/admin-login?expired=1" : "/login?expired=1");
+}
+
 async function api(path, { method = "GET", token, body, isForm = false } = {}) {
   const headers = {};
   if (token) headers.Authorization = `Bearer ${token}`;
@@ -145,6 +152,11 @@ async function api(path, { method = "GET", token, body, isForm = false } = {}) {
     headers,
     body: isForm ? body : body ? JSON.stringify(body) : undefined,
   });
+
+  if (response.status === 401) {
+    handleAuthExpired();
+    throw new Error("Your session has expired. Redirecting to login...");
+  }
 
   const contentType = response.headers.get("content-type") || "";
   const data = contentType.includes("application/json") ? await response.json() : await response.text();
@@ -236,6 +248,7 @@ function AuthForm({ type }) {
   const [form, setForm] = useState({ name: "", email: "", phone: "", password: "" });
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  const isExpired = window.location.search.includes("expired=1");
 
   const title = isSignup ? "Create your account" : isAdmin ? "Admin sign in" : "Welcome back";
 
@@ -281,6 +294,11 @@ function AuthForm({ type }) {
           <input type="email" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} required />
           <label>Password</label>
           <input type="password" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} minLength={8} required />
+          {isExpired && !error && (
+            <div className="alert" style={{ background: "rgba(245, 158, 11, 0.15)", borderColor: "#f59e0b", color: "#fbbf24" }}>
+              Your session has expired. Please sign in again.
+            </div>
+          )}
           {error && <div className="alert">{error}</div>}
           <button className="primary-button" disabled={loading}>{loading ? "Working..." : title}</button>
         </form>
@@ -406,7 +424,7 @@ function LeaderboardPanel({ leaderboards }) {
   );
 }
 
-function AttemptCard({ attempt, onViewAnalysis, onArchive, onRestore, onDelete }) {
+function AttemptCard({ attempt, clientName: clientNameProp, onViewAnalysis, onArchive, onRestore, onDelete }) {
   const blueIq = Math.ceil(
     Number(attempt.blue_iq_score || (Number(attempt.pressure_score || 0) + Number(attempt.balance_score || 0) + Number(attempt.rotation_score || 0) + Number(attempt.edging_score || 0)) / 4)
   );
@@ -417,10 +435,17 @@ function AttemptCard({ attempt, onViewAnalysis, onArchive, onRestore, onDelete }
   const runNumber = attempt.run_number || attempt.attempt_number || attempt.id;
   const sessionLabel = attempt.session_number ? `Session ${attempt.session_number}` : "Session";
   const dateLabel = formatDate(attempt.session_date || attempt.created_at || attempt.timestamp);
+  const clientName = clientNameProp || attempt.client_name || attempt.person_name || attempt.user_name || attempt.person?.name;
   return (
     <article className={`attempt-card ${attempt.is_archived ? "is-archived" : ""}`}>
       <div className="attempt-top">
         <div>
+          {clientName && (
+            <div className="attempt-client-tag">
+              <span className="attempt-client-icon">👤</span>
+              <strong className="attempt-client-name">{clientName}</strong>
+            </div>
+          )}
           <p className="eyebrow">{sessionLabel} / Run {runNumber}</p>
           <h3>Blue IQ {blueIq}<span>/240</span></h3>
           <p className="attempt-date">{dateLabel}</p>
@@ -492,6 +517,49 @@ function UploadAnalysisPanel({ token, clients = [], fixedUser = null, onComplete
   const [uploadError, setUploadError] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [queuedJobInfo, setQueuedJobInfo] = useState(null);
+
+  // Video preview & orientation state
+  const [previewUrl, setPreviewUrl] = useState("");
+  const [videoRotation, setVideoRotation] = useState(""); // "" (auto), "-90", "90", "180", "0"
+  const [isPortraitDetected, setIsPortraitDetected] = useState(false);
+
+  function handleLocalFileSelect(e) {
+    const file = e.target.files?.[0];
+    if (!file) {
+      if (previewUrl) URL.revokeObjectURL(previewUrl);
+      setPreviewUrl("");
+      setVideoRotation("");
+      setIsPortraitDetected(false);
+      return;
+    }
+    const url = URL.createObjectURL(file);
+    if (previewUrl) URL.revokeObjectURL(previewUrl);
+    setPreviewUrl(url);
+
+    const v = document.createElement("video");
+    v.preload = "metadata";
+    v.src = url;
+    v.onloadedmetadata = () => {
+      const isPortrait = v.videoHeight > v.videoWidth;
+      setIsPortraitDetected(isPortrait);
+      if (isPortrait) {
+        setVideoRotation("-90");
+      } else {
+        setVideoRotation("");
+      }
+    };
+  }
+
+  function cycleRotation() {
+    const cycle = {
+      "": "-90",
+      "-90": "180",
+      "180": "90",
+      "90": "0",
+      "0": "",
+    };
+    setVideoRotation(cycle[videoRotation] ?? "");
+  }
 
   // Google Drive state
   const [driveFile, setDriveFile] = useState(null); // { id, name, size, oauthToken }
@@ -625,6 +693,9 @@ function UploadAnalysisPanel({ token, clients = [], fixedUser = null, onComplete
           } catch {
             resolve(xhr.responseText);
           }
+        } else if (xhr.status === 401) {
+          handleAuthExpired(true);
+          reject(new Error("Your session has expired. Redirecting to login..."));
         } else {
           try {
             const errData = JSON.parse(xhr.responseText);
@@ -655,9 +726,13 @@ function UploadAnalysisPanel({ token, clients = [], fixedUser = null, onComplete
     try {
       let response;
       if (uploadSource === "local") {
+        const formData = new FormData(formElement);
+        if (!videoRotation) {
+          formData.delete("rotation");
+        }
         response = await uploadWithProgress(
           `${API_BASE}/api/analyze-premium-overlay/`,
-          new FormData(formElement)
+          formData
         );
       } else {
         const targetFileId = driveFile?.id || extractDriveId(driveLinkInput);
@@ -686,6 +761,10 @@ function UploadAnalysisPanel({ token, clients = [], fixedUser = null, onComplete
       }
 
       formElement.reset();
+      if (previewUrl) URL.revokeObjectURL(previewUrl);
+      setPreviewUrl("");
+      setVideoRotation("");
+      setIsPortraitDetected(false);
       setDriveFile(null);
       setDriveLinkInput("");
 
@@ -767,7 +846,58 @@ function UploadAnalysisPanel({ token, clients = [], fixedUser = null, onComplete
       {uploadSource === "local" ? (
         <>
           <label>Video file</label>
-          <input type="file" name="file" accept="video/*" required disabled={isSubmitting} />
+          <input
+            type="file"
+            name="file"
+            accept="video/*"
+            required
+            disabled={isSubmitting}
+            onChange={handleLocalFileSelect}
+          />
+          {previewUrl && (
+            <div className="video-upload-preview-card">
+              <div className="video-preview-header">
+                <span>
+                  🎬 Video Preview
+                  {isPortraitDetected && <span className="portrait-badge">📱 Portrait (Auto Horizontal)</span>}
+                </span>
+                <button
+                  type="button"
+                  className="ghost-button rotate-cycle-btn"
+                  onClick={cycleRotation}
+                  title="Cycle 90° rotation"
+                  disabled={isSubmitting}
+                >
+                  ⟲ Rotate 90° {videoRotation ? `(${videoRotation}°)` : "(Auto)"}
+                </button>
+              </div>
+              <div className="video-preview-wrapper">
+                <video
+                  src={previewUrl}
+                  controls
+                  style={{
+                    transform: videoRotation ? `rotate(${videoRotation}deg)` : "none",
+                    transition: "transform 0.25s ease",
+                  }}
+                />
+              </div>
+              <div className="rotation-control-row">
+                <label>Orientation:</label>
+                <select
+                  name="rotation"
+                  value={videoRotation}
+                  onChange={(e) => setVideoRotation(e.target.value)}
+                  disabled={isSubmitting}
+                >
+                  <option value="">Auto-Detect (Always Horizontal)</option>
+                  <option value="-90">Rotate 90° CCW (Counter-Clockwise)</option>
+                  <option value="90">Rotate 90° CW (Clockwise)</option>
+                  <option value="180">Rotate 180° (Upside Down)</option>
+                  <option value="0">Original (No Rotation)</option>
+                </select>
+              </div>
+            </div>
+          )}
         </>
       ) : (
         <div className="drive-picker-container">
@@ -1192,7 +1322,13 @@ function ClientDashboard() {
           <p>Videos and PDF reports uploaded by the Bluerun team.</p>
         </div>
         <div className="cards-grid">
-          {displayedAttempts.length ? displayedAttempts.map((attempt) => <AttemptCard key={attempt.id} attempt={attempt} />) : <EmptyState text="No attempts have been uploaded yet." />}
+          {displayedAttempts.length ? displayedAttempts.map((attempt) => (
+            <AttemptCard
+              key={attempt.id}
+              attempt={attempt}
+              clientName={attempt.person_name || attempt.client_name || user?.name}
+            />
+          )) : <EmptyState text="No attempts have been uploaded yet." />}
         </div>
         {hasMore && (
           <div style={{ textAlign: 'center', marginTop: '24px' }}>
@@ -1397,6 +1533,7 @@ function AdminAthleteProfile({ userId }) {
                 <AttemptCard
                   key={attempt.id}
                   attempt={attempt}
+                  clientName={attempt.person_name || attempt.client_name || user?.name}
                   onViewAnalysis={setGraphAttempt}
                   onArchive={handleArchive}
                   onRestore={handleRestore}
@@ -1542,6 +1679,7 @@ function AdminDashboard() {
   useAutoRefresh(loadActivity, Boolean(token));
 
   const clients = useMemo(() => users.filter((user) => user.role !== "admin"), [users]);
+  const clientsById = useMemo(() => Object.fromEntries(users.map((u) => [u.id, u.name])), [users]);
   const searchedClients = useMemo(() => {
     const ranked = clients
       .map((client) => ({ client, score: clientSearchScore(client, clientSearch) }))
@@ -1658,6 +1796,7 @@ function AdminDashboard() {
                     <AttemptCard
                       key={attempt.id}
                       attempt={attempt}
+                      clientName={attempt.person_name || attempt.client_name || clientsById[attempt.person_id]}
                       onViewAnalysis={setGraphAttempt}
                       onArchive={handleArchive}
                       onRestore={handleRestore}
