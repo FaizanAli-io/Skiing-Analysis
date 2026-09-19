@@ -430,6 +430,7 @@ def process_google_drive_analysis_background(
     user_name: Optional[str] = None,
     attempt_number: Optional[int] = None,
     oauth_token: Optional[str] = None,
+    rotation_override: Optional[int] = None,
 ):
     """Process a Google Drive video: wait in queue, download stream, and run analysis."""
     logger.info("Job %s: Waiting in queue for runner slot...", job_id)
@@ -453,6 +454,7 @@ def process_google_drive_analysis_background(
                 report=report,
                 user_name=user_name,
                 attempt_number=attempt_number,
+                rotation_override=rotation_override,
             )
         except Exception as exc:
             logger.error("Job %s failed: %s", job_id, exc, exc_info=True)

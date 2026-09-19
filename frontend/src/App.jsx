@@ -143,14 +143,15 @@ function handleAuthExpired(isAdmin = false) {
 }
 
 async function api(path, { method = "GET", token, body, isForm = false } = {}) {
+  const isFormData = isForm || (typeof FormData !== "undefined" && body instanceof FormData);
   const headers = {};
   if (token) headers.Authorization = `Bearer ${token}`;
-  if (body && !isForm) headers["Content-Type"] = "application/json";
+  if (body && !isFormData) headers["Content-Type"] = "application/json";
 
   const response = await fetch(`${API_BASE}/api${path}`, {
     method,
     headers,
-    body: isForm ? body : body ? JSON.stringify(body) : undefined,
+    body: isFormData ? body : body ? JSON.stringify(body) : undefined,
   });
 
   if (response.status === 401) {
@@ -750,6 +751,7 @@ function UploadAnalysisPanel({ token, clients = [], fixedUser = null, onComplete
         formData.append("drive_file_id", targetFileId);
         if (driveFile?.name) formData.append("file_name", driveFile.name);
         if (driveFile?.oauthToken) formData.append("oauth_token", driveFile.oauthToken);
+        if (videoRotation) formData.append("rotation", videoRotation);
 
         setUploadState("Queueing Google Drive video for download and analysis...");
         setUploadProgress(100);
@@ -757,6 +759,7 @@ function UploadAnalysisPanel({ token, clients = [], fixedUser = null, onComplete
           method: "POST",
           token,
           body: formData,
+          isForm: true,
         });
       }
 

@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File, Form, Depends, APIRouter, HTTPException, BackgroundTasks
+from fastapi import FastAPI, UploadFile, File, Form, Depends, APIRouter, HTTPException, BackgroundTasks, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
@@ -279,22 +279,56 @@ def get_google_drive_config():
 
 @app.post("/api/analyze-google-drive/")
 async def analyze_ski_video_google_drive(
+    request: Request,
     background_tasks: BackgroundTasks,
-    user_id: int = Form(...),
-    display_mode: str = Form("coach"),
-    report: bool = Form(False),
-    drive_file_id: Optional[str] = Form(None),
-    drive_url: Optional[str] = Form(None),
-    file_name: Optional[str] = Form(None),
-    oauth_token: Optional[str] = Form(None),
     current_admin: Person = Depends(require_admin),
 ):
     """
     Queue a Google Drive video for background analysis.
+    Accepts both multipart/form-data and application/json payloads.
     Downloads the video directly in the worker and runs the sequential pipeline.
     """
     from services.google_drive import extract_drive_file_id, get_drive_file_metadata
     from services.background_tasks import process_google_drive_analysis_background
+
+    # Parse body from JSON or Form
+    content_type = request.headers.get("content-type", "")
+    if "application/json" in content_type:
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = {}
+    else:
+        try:
+            form_data = await request.form()
+            payload = dict(form_data)
+        except Exception:
+            payload = {}
+
+    user_id_raw = payload.get("user_id")
+    if user_id_raw is None or str(user_id_raw).strip() in ("", "null", "undefined"):
+        raise HTTPException(status_code=422, detail="user_id is required")
+    try:
+        user_id = int(user_id_raw)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=422, detail="user_id must be a valid integer")
+
+    display_mode = str(payload.get("display_mode") or "coach")
+    report_val = payload.get("report")
+    report = report_val in (True, "true", "True", "1", 1)
+
+    drive_file_id = payload.get("drive_file_id")
+    drive_url = payload.get("drive_url")
+    file_name = payload.get("file_name")
+    oauth_token = payload.get("oauth_token")
+    rotation = payload.get("rotation")
+
+    rotation_override: Optional[int] = None
+    if rotation is not None and str(rotation).strip() not in ("", "null", "undefined", "none"):
+        try:
+            rotation_override = int(rotation)
+        except (ValueError, TypeError):
+            rotation_override = None
 
     resolved_file_id = extract_drive_file_id(drive_file_id or drive_url or "")
     if not resolved_file_id:
@@ -316,7 +350,7 @@ async def analyze_ski_video_google_drive(
 
     # Resolve filename
     actual_filename = file_name
-    if not actual_filename or actual_filename.strip() in ("", "undefined"):
+    if not actual_filename or str(actual_filename).strip() in ("", "undefined", "null"):
         meta = get_drive_file_metadata(resolved_file_id, oauth_token=oauth_token)
         actual_filename = meta.get("name", f"gdrive_{resolved_file_id[:8]}.mp4")
 
@@ -354,6 +388,7 @@ async def analyze_ski_video_google_drive(
         user_name=user_name,
         attempt_number=attempt_number,
         oauth_token=oauth_token,
+        rotation_override=rotation_override,
     )
 
     return {
