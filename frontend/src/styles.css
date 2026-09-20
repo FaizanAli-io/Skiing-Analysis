@@ -1653,6 +1653,181 @@ select:focus {
   border-left: 3px solid #fbbf24;
 }
 
+/* Client Search & Fuzzy Dropdown in Upload Panel */
+.client-select-field {
+  display: grid;
+  gap: 6px;
+  position: relative;
+  margin-bottom: 4px;
+}
+
+.selected-client-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 14px;
+  background: rgba(106, 175, 255, 0.08);
+  border: 1px solid rgba(106, 175, 255, 0.3);
+  border-radius: 10px;
+}
+
+.selected-client-info {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.selected-client-avatar {
+  font-size: 18px;
+  opacity: 0.85;
+}
+
+.selected-client-details {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.selected-client-name {
+  color: var(--text);
+  font-weight: 700;
+  font-size: 14px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.selected-client-email {
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.change-client-btn {
+  padding: 5px 12px;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--blue);
+  background: rgba(106, 175, 255, 0.12);
+  border: 1px solid rgba(106, 175, 255, 0.3);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  white-space: nowrap;
+}
+
+.change-client-btn:hover:not(:disabled) {
+  background: rgba(106, 175, 255, 0.22);
+  border-color: var(--blue);
+  color: #fff;
+}
+
+.client-search-wrapper {
+  position: relative;
+  width: 100%;
+}
+
+.client-search-input-box {
+  position: relative;
+  display: flex;
+  align-items: center;
+  width: 100%;
+}
+
+.client-search-icon {
+  position: absolute;
+  left: 14px;
+  font-size: 14px;
+  opacity: 0.6;
+  pointer-events: none;
+}
+
+.client-search-input-box .client-search-input {
+  width: 100%;
+  min-height: 46px;
+  padding: 0 38px 0 38px;
+  color: var(--text);
+  background: #091426;
+  border: 1px solid var(--line-soft);
+  border-radius: 10px;
+  font-size: 14px;
+  outline: none;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.client-search-input-box .client-search-input:focus {
+  border-color: var(--blue);
+  box-shadow: 0 0 0 2px rgba(106, 175, 255, 0.2);
+}
+
+.client-search-clear-btn {
+  position: absolute;
+  right: 12px;
+  padding: 2px 6px;
+  color: var(--muted);
+  background: transparent;
+  border: 0;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.client-search-clear-btn:hover {
+  color: var(--text);
+}
+
+.client-search-dropdown {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  right: 0;
+  max-height: 240px;
+  overflow-y: auto;
+  background: #0b182b;
+  border: 1px solid rgba(106, 175, 255, 0.28);
+  border-radius: 10px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.55);
+  z-index: 100;
+  display: grid;
+  gap: 2px;
+  padding: 6px;
+}
+
+.client-search-dropdown-item {
+  display: grid;
+  gap: 2px;
+  padding: 8px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.client-search-dropdown-item:hover,
+.client-search-dropdown-item.active {
+  background: rgba(106, 175, 255, 0.14);
+}
+
+.client-dropdown-name {
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.client-dropdown-email {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.client-search-empty {
+  padding: 16px 12px;
+  color: var(--muted);
+  font-size: 13px;
+  text-align: center;
+}
+
 /* Upload Queued Confirmation Banner */
 .upload-queued-banner {
   margin-top: 16px;

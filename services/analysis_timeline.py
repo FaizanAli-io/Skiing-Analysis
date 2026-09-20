@@ -70,7 +70,7 @@ TIMELINE_PARAMETER_CONFIG: Dict[str, Any] = {
                     "larger up-and-down range earns a higher score because it "
                     "shows more active pressure release and reapplication."
                 ),
-                "mapping": "2% body-height range or less = 60; 14% or more = 240",
+                "mapping": "2% body-height range or less = 60; 12.5% or more = 240",
                 "weight": "75% of Pressure",
             },
             {

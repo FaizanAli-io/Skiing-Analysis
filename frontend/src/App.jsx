@@ -22,6 +22,27 @@ function normalizeSearchText(value) {
     .trim();
 }
 
+function levenshteinDistance(s1, s2) {
+  if (s1 === s2) return 0;
+  if (!s1.length) return s2.length;
+  if (!s2.length) return s1.length;
+  const prev = [];
+  for (let i = 0; i <= s2.length; i++) prev[i] = i;
+  for (let i = 0; i < s1.length; i++) {
+    const current = [i + 1];
+    for (let j = 0; j < s2.length; j++) {
+      const cost = s1[i] === s2[j] ? 0 : 1;
+      current[j + 1] = Math.min(
+        current[j] + 1,
+        prev[j + 1] + 1,
+        prev[j] + cost
+      );
+    }
+    prev.splice(0, prev.length, ...current);
+  }
+  return prev[s2.length];
+}
+
 function fuzzyFieldScore(field, term) {
   if (!field || !term) return Number.POSITIVE_INFINITY;
   if (field === term) return 0;
@@ -43,8 +64,28 @@ function fuzzyFieldScore(field, term) {
     termIndex += 1;
   }
 
-  if (termIndex !== term.length) return Number.POSITIVE_INFINITY;
-  return 10 + skippedCharacters + (firstMatch / 100);
+  if (termIndex === term.length) {
+    return 10 + skippedCharacters + (firstMatch / 100);
+  }
+
+  if (term.length >= 3) {
+    const tokens = field.split(/[\s@._-]+/).filter(Boolean);
+    let minDistance = Number.POSITIVE_INFINITY;
+    const maxAllowed = term.length <= 4 ? 1 : 2;
+    for (const token of tokens) {
+      if (Math.abs(token.length - term.length) <= maxAllowed) {
+        const dist = levenshteinDistance(term, token);
+        if (dist <= maxAllowed && dist < minDistance) {
+          minDistance = dist;
+        }
+      }
+    }
+    if (Number.isFinite(minDistance)) {
+      return 20 + minDistance * 5;
+    }
+  }
+
+  return Number.POSITIVE_INFINITY;
 }
 
 function clientSearchScore(client, query) {
@@ -569,6 +610,65 @@ function UploadAnalysisPanel({ token, clients = [], fixedUser = null, onComplete
   const [isPickerLoading, setIsPickerLoading] = useState(false);
   const [pickerError, setPickerError] = useState("");
 
+  // Client fuzzy search state
+  const [selectedClient, setSelectedClient] = useState(null);
+  const [clientSearchText, setClientSearchText] = useState("");
+  const [isClientDropdownOpen, setIsClientDropdownOpen] = useState(false);
+  const [highlightedClientIndex, setHighlightedClientIndex] = useState(0);
+  const clientDropdownRef = useRef(null);
+  const clientInputRef = useRef(null);
+
+  const matchedClients = useMemo(() => {
+    if (!clients || !clients.length) return [];
+    if (!clientSearchText.trim()) {
+      return [...clients]
+        .sort((a, b) => (a.name || "").localeCompare(b.name || ""))
+        .slice(0, 30);
+    }
+    const ranked = clients
+      .map((client) => ({ client, score: clientSearchScore(client, clientSearchText) }))
+      .filter(({ score }) => Number.isFinite(score));
+
+    ranked.sort((a, b) => a.score - b.score || (a.client.name || "").localeCompare(b.client.name || ""));
+    return ranked.map(({ client }) => client);
+  }, [clients, clientSearchText]);
+
+  function handleClientKeyDown(e) {
+    if (!isClientDropdownOpen) {
+      if (e.key === "ArrowDown" || e.key === "Enter") {
+        setIsClientDropdownOpen(true);
+      }
+      return;
+    }
+
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      setHighlightedClientIndex((prev) => (prev < matchedClients.length - 1 ? prev + 1 : 0));
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      setHighlightedClientIndex((prev) => (prev > 0 ? prev - 1 : matchedClients.length - 1));
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      if (matchedClients[highlightedClientIndex]) {
+        setSelectedClient(matchedClients[highlightedClientIndex]);
+        setIsClientDropdownOpen(false);
+        setClientSearchText("");
+      }
+    } else if (e.key === "Escape") {
+      setIsClientDropdownOpen(false);
+    }
+  }
+
+  useEffect(() => {
+    function handleClickOutside(event) {
+      if (clientDropdownRef.current && !clientDropdownRef.current.contains(event.target)) {
+        setIsClientDropdownOpen(false);
+      }
+    }
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, []);
+
   useEffect(() => {
     api("/config/google-drive")
       .then((cfg) => {
@@ -725,9 +825,15 @@ function UploadAnalysisPanel({ token, clients = [], fixedUser = null, onComplete
     setIsSubmitting(true);
 
     try {
+      const targetUserId = fixedUser ? fixedUser.id : (selectedClient ? selectedClient.id : formElement.querySelector('[name="user_id"]')?.value);
+      if (!targetUserId) {
+        throw new Error("Please search and select a client before submitting.");
+      }
+
       let response;
       if (uploadSource === "local") {
         const formData = new FormData(formElement);
+        formData.set("user_id", targetUserId);
         if (!videoRotation) {
           formData.delete("rotation");
         }
@@ -741,11 +847,10 @@ function UploadAnalysisPanel({ token, clients = [], fixedUser = null, onComplete
           throw new Error("Please select a video from Google Drive or paste a valid Google Drive video link.");
         }
         const formData = new FormData();
-        const userId = fixedUser ? fixedUser.id : formElement.querySelector('[name="user_id"]').value;
         const displayMode = formElement.querySelector('[name="display_mode"]').value;
         const report = formElement.querySelector('[name="report"]')?.checked ? "true" : "false";
 
-        formData.append("user_id", userId);
+        formData.append("user_id", targetUserId);
         formData.append("display_mode", displayMode);
         formData.append("report", report);
         formData.append("drive_file_id", targetFileId);
@@ -770,6 +875,8 @@ function UploadAnalysisPanel({ token, clients = [], fixedUser = null, onComplete
       setIsPortraitDetected(false);
       setDriveFile(null);
       setDriveLinkInput("");
+      setSelectedClient(null);
+      setClientSearchText("");
 
       if (response.job_id) {
         setUploadProgress(100);
@@ -826,15 +933,97 @@ function UploadAnalysisPanel({ token, clients = [], fixedUser = null, onComplete
           </div>
         </>
       ) : (
-        <>
-          <label>Select user</label>
-          <select name="user_id" required disabled={isSubmitting}>
-            <option value="">Choose a client</option>
-            {clients.map((user) => (
-              <option key={user.id} value={user.id}>{user.name} - {user.email}</option>
-            ))}
-          </select>
-        </>
+        <div className="client-select-field">
+          <label>Assign to client</label>
+          {selectedClient ? (
+            <div className="selected-client-card">
+              <div className="selected-client-info">
+                <span className="selected-client-avatar">👤</span>
+                <div className="selected-client-details">
+                  <span className="selected-client-name">{selectedClient.name}</span>
+                  <small className="selected-client-email">{selectedClient.email}</small>
+                </div>
+              </div>
+              <button
+                type="button"
+                className="change-client-btn"
+                onClick={() => {
+                  setSelectedClient(null);
+                  setClientSearchText("");
+                  setIsClientDropdownOpen(true);
+                  setTimeout(() => clientInputRef.current?.focus(), 50);
+                }}
+                disabled={isSubmitting}
+              >
+                Change
+              </button>
+              <input type="hidden" name="user_id" value={selectedClient.id} required />
+            </div>
+          ) : (
+            <div className="client-search-wrapper" ref={clientDropdownRef}>
+              <div className="client-search-input-box">
+                <span className="client-search-icon">🔍</span>
+                <input
+                  ref={clientInputRef}
+                  type="text"
+                  className="client-search-input"
+                  placeholder="Search client by name or email..."
+                  value={clientSearchText}
+                  onChange={(e) => {
+                    setClientSearchText(e.target.value);
+                    setIsClientDropdownOpen(true);
+                    setHighlightedClientIndex(0);
+                  }}
+                  onFocus={() => setIsClientDropdownOpen(true)}
+                  onKeyDown={handleClientKeyDown}
+                  disabled={isSubmitting}
+                  autoComplete="off"
+                />
+                {clientSearchText && (
+                  <button
+                    type="button"
+                    className="client-search-clear-btn"
+                    onClick={() => {
+                      setClientSearchText("");
+                      clientInputRef.current?.focus();
+                    }}
+                    tabIndex={-1}
+                  >
+                    ✕
+                  </button>
+                )}
+              </div>
+
+              {isClientDropdownOpen && (
+                <div className="client-search-dropdown">
+                  {matchedClients.length > 0 ? (
+                    matchedClients.map((client, idx) => (
+                      <div
+                        key={client.id}
+                        className={`client-search-dropdown-item ${idx === highlightedClientIndex ? "active" : ""}`}
+                        onMouseDown={(e) => {
+                          e.preventDefault();
+                          setSelectedClient(client);
+                          setIsClientDropdownOpen(false);
+                          setClientSearchText("");
+                        }}
+                        onMouseEnter={() => setHighlightedClientIndex(idx)}
+                      >
+                        <div className="client-dropdown-name">{client.name}</div>
+                        <div className="client-dropdown-email">{client.email}</div>
+                      </div>
+                    ))
+                  ) : (
+                    <div className="client-search-empty">
+                      No clients found matching "{clientSearchText.trim()}"
+                    </div>
+                  )}
+                </div>
+              )}
+              <input type="hidden" name="user_id" value="" required />
+            </div>
+          )}
+        </div>
       )}
       <label>Display mode</label>
       <select name="display_mode" defaultValue="coach" disabled={isSubmitting}>
