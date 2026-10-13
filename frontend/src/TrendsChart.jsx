@@ -11,6 +11,7 @@ import {
   Title,
   Tooltip,
 } from "chart.js";
+import { scoreBand } from "./scoreBands";
 
 ChartJS.register(
   CategoryScale,
@@ -28,19 +29,43 @@ const METRICS = [
   ["pressure", "Pressure"],
   ["balance", "Balance"],
   ["rotation", "Rotation"],
-  ["edging", "Edging"],
+  ["edging", "Parallelism"],
 ];
 
-function comparisonText(comparison) {
-  if (!comparison) return "No comparison available";
-  if (comparison.status === "new_personal_best") {
-    const previous = comparison.previous_best?.score;
-    const gain = previous == null ? 0 : comparison.current_score - previous;
-    return gain > 0 ? `New personal best, ${gain} points higher` : "New personal best";
+// Never leads with a drop: below the first run, talk about where the score sits.
+const KEEP_GOING_LINES = [
+  "Every run adds to the foundation. The next one could be the breakthrough.",
+  "Progress isn't a straight line. Keep stacking the reps.",
+  "Steady work at this level is exactly how the next level arrives.",
+];
+
+function firstRunComparison(comparison, { you, metricLabel, metricIndex }) {
+  if (!comparison) return { headline: "No comparison yet", detail: "Complete another run to see progress." };
+  const current = comparison.current_score;
+  const level = scoreBand(current)[0];
+  const difference = comparison.difference;
+  if (comparison.is_first_run) {
+    return {
+      headline: "This is the starting line",
+      detail: `Every future ${metricLabel} score is measured from here.`,
+    };
   }
-  if (comparison.status === "baseline") return "First recorded result: baseline established";
-  if (comparison.status === "matches_personal_best") return "Matches your personal best";
-  return `${comparison.points_below} points below your personal best`;
+  if (difference > 0) {
+    return {
+      headline: `Up ${difference} point${difference === 1 ? "" : "s"}`,
+      detail: `${metricLabel} since ${you.possessive} first run.`,
+    };
+  }
+  if (difference === 0) {
+    return {
+      headline: `Holding at ${level}`,
+      detail: `${current} matches ${you.possessive} first run. Consistency is a skill too.`,
+    };
+  }
+  return {
+    headline: `${current} puts ${you.object} at ${level}`,
+    detail: KEEP_GOING_LINES[metricIndex % KEEP_GOING_LINES.length],
+  };
 }
 
 function bestContext(record) {
@@ -52,14 +77,25 @@ function bestContext(record) {
   return parts.join(" / ") || "Recorded result";
 }
 
-export default function TrendsChart({ api, token, refreshKey }) {
+export default function TrendsChart({
+  api,
+  token,
+  refreshKey,
+  endpoint = "/me/trends",
+  audience = "client",
+  athleteName = "",
+}) {
+  const isClient = audience === "client";
+  const you = isClient
+    ? { possessive: "your", object: "you" }
+    : { possessive: "their", object: athleteName ? athleteName.split(" ")[0] : "them" };
   const [trends, setTrends] = useState(null);
   const [selectedMetric, setSelectedMetric] = useState("blue_iq");
   const [error, setError] = useState("");
 
   useEffect(() => {
     let active = true;
-    api("/me/trends?limit=15", { token })
+    api(endpoint, { token })
       .then((data) => {
         if (!active) return;
         if (data.error) {
@@ -73,14 +109,29 @@ export default function TrendsChart({ api, token, refreshKey }) {
     return () => {
       active = false;
     };
-  }, [api, token, refreshKey]);
+  }, [api, token, refreshKey, endpoint]);
 
   const chartData = useMemo(() => {
     if (!trends) return null;
     const metricLabel = METRICS.find(([key]) => key === selectedMetric)?.[1] || selectedMetric;
+    const firstScore = trends.first_run?.scores?.[selectedMetric];
+    const reference = firstScore == null ? [] : [
+      {
+        label: "First run",
+        data: trends.time_series.runs.map(() => firstScore),
+        borderColor: "rgba(139, 192, 213, 0.55)",
+        borderWidth: 1.5,
+        borderDash: [6, 6],
+        pointRadius: 0,
+        pointHoverRadius: 0,
+        fill: false,
+        tension: 0,
+      },
+    ];
     return {
       labels: trends.time_series.runs.map((run) => `Run ${run}`),
       datasets: [
+        ...reference,
         {
           label: metricLabel,
           data: trends.time_series[selectedMetric],
@@ -89,7 +140,8 @@ export default function TrendsChart({ api, token, refreshKey }) {
           borderWidth: 2,
           tension: 0.28,
           fill: true,
-          pointRadius: 4,
+          // Every run is plotted; keep dots small when the history is long.
+          pointRadius: trends.time_series.runs.length > 30 ? 2 : 4,
           pointHoverRadius: 6,
           pointBackgroundColor: "#6aafff",
           pointBorderColor: "#07111f",
@@ -127,10 +179,13 @@ export default function TrendsChart({ api, token, refreshKey }) {
     );
   }
 
-  const comparison = trends.current_vs_personal_best?.[selectedMetric];
-  const personalBest = trends.personal_bests?.[selectedMetric];
+  const comparison = trends.current_vs_first_run?.[selectedMetric];
+  const firstRun = trends.first_run;
   const currentScore = comparison?.current_score ?? trends.time_series[selectedMetric]?.at(-1) ?? "--";
   const selectedLabel = METRICS.find(([key]) => key === selectedMetric)?.[1];
+  const metricIndex = METRICS.findIndex(([key]) => key === selectedMetric);
+  const summary = firstRunComparison(comparison, { you, metricLabel: selectedLabel, metricIndex });
+  const trendClass = comparison && !comparison.is_first_run && comparison.difference > 0 ? "is-up" : "is-steady";
 
   const chartOptions = {
     responsive: true,
@@ -149,7 +204,7 @@ export default function TrendsChart({ api, token, refreshKey }) {
         displayColors: false,
         callbacks: {
           afterTitle: (items) => trends.time_series.dates[items[0]?.dataIndex] || "",
-          label: (item) => `${selectedLabel}: ${item.formattedValue} / 240`,
+          label: (item) => `${item.dataset.label === "First run" ? "First run" : selectedLabel}: ${item.formattedValue} / 240`,
         },
       },
     },
@@ -173,7 +228,11 @@ export default function TrendsChart({ api, token, refreshKey }) {
         <div>
           <p className="eyebrow">Run history</p>
           <h2>Score history</h2>
-          <p>Compare completed runs against your all-time personal best.</p>
+          <p>
+            {isClient
+              ? "See how far you've come since your first run."
+              : `See how far ${athleteName || "this athlete"} has come since their first run.`}
+          </p>
         </div>
         <div className="metric-tabs" role="tablist" aria-label="Score metric">
           {METRICS.map(([key, label]) => (
@@ -202,14 +261,14 @@ export default function TrendsChart({ api, token, refreshKey }) {
           <p>{trends.date_range.end}</p>
         </div>
         <div className="comparison-card personal-best-card">
-          <span>Personal best</span>
-          <strong>{personalBest?.score ?? "--"}<small>/240</small></strong>
-          <p>{bestContext(personalBest)}</p>
+          <span>First run</span>
+          <strong>{firstRun?.scores?.[selectedMetric] ?? "--"}<small>/240</small></strong>
+          <p>{bestContext(firstRun)}</p>
         </div>
-        <div className="comparison-card comparison-copy">
-          <span>Current comparison</span>
-          <strong>{comparisonText(comparison)}</strong>
-          <p>Compared with your highest completed result.</p>
+        <div className={`comparison-card comparison-copy first-run-progress ${trendClass}`}>
+          <span>Since {you.possessive} first run</span>
+          <strong>{summary.headline}</strong>
+          <p>{summary.detail}</p>
         </div>
       </div>
     </section>

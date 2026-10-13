@@ -688,7 +688,7 @@ def _draw_joint_angle_arc(frame, vertex, point_a, point_b, color, radius=24):
 def _draw_metric_legend(frame):
     """Draw the four metric identities using the shared vector colors."""
     items = (
-        ("EDGING", METRIC_COLORS_BGR["edging"]),
+        ("PARALLELISM", METRIC_COLORS_BGR["edging"]),
         ("PRESSURE", METRIC_COLORS_BGR["pressure"]),
         ("ROTATION", METRIC_COLORS_BGR["rotation"]),
         ("BALANCE", METRIC_COLORS_BGR["balance"]),
@@ -904,7 +904,7 @@ def draw_biomechanics_overlay(frame, body_points, ski_lines, metrics):
                 label_y = min(mid_a[1], mid_b[1]) - 14
                 _draw_biomech_label(
                     frame,
-                    f"Edging {ski_parallelism:.0f} deg",
+                    f"Parallelism {ski_parallelism:.0f} deg",
                     label_x,
                     label_y,
                     edging_color,

@@ -5,7 +5,7 @@ import json
 import os
 import secrets
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
@@ -51,20 +51,59 @@ def verify_password(password: str, password_hash: str) -> bool:
         return False
 
 
-def create_access_token(subject: str, role: str, expires_minutes: int = 60 * 24) -> str:
+def _sign_token(payload: Dict[str, Any]) -> str:
     header = {"alg": "HS256", "typ": "JWT"}
-    now = datetime.now(timezone.utc)
-    payload = {
-        "sub": subject,
-        "role": role,
-        "iat": int(now.timestamp()),
-        "exp": int((now + timedelta(minutes=expires_minutes)).timestamp()),
-    }
     header_part = _b64encode(json.dumps(header, separators=(",", ":")).encode("utf-8"))
     payload_part = _b64encode(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
     signing_input = f"{header_part}.{payload_part}".encode("ascii")
     signature = hmac.new(_jwt_secret().encode("utf-8"), signing_input, hashlib.sha256).digest()
     return f"{header_part}.{payload_part}.{_b64encode(signature)}"
+
+
+def create_access_token(
+    subject: str,
+    role: str,
+    expires_minutes: int = 60 * 24,
+    token_version: int = 0,
+) -> str:
+    now = datetime.now(timezone.utc)
+    return _sign_token({
+        "sub": subject,
+        "role": role,
+        # Bumped on password change/reset so older sessions stop working.
+        "ver": int(token_version or 0),
+        "iat": int(now.timestamp()),
+        "exp": int((now + timedelta(minutes=expires_minutes)).timestamp()),
+    })
+
+
+def create_download_token(
+    user_id: int,
+    video_id: int,
+    fmt: str,
+    mode: str,
+    run_number: Optional[int] = None,
+    expires_minutes: int = 10,
+) -> str:
+    """Short-lived, single-purpose link token for a plain browser download."""
+    now = datetime.now(timezone.utc)
+    return _sign_token({
+        "purpose": "download",
+        "sub": str(user_id),
+        "vid": int(video_id),
+        "fmt": fmt,
+        "mode": mode,
+        "run": run_number,
+        "iat": int(now.timestamp()),
+        "exp": int((now + timedelta(minutes=expires_minutes)).timestamp()),
+    })
+
+
+def decode_download_token(token: str) -> Dict[str, Any]:
+    payload = decode_access_token(token)
+    if payload.get("purpose") != "download":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid download link")
+    return payload
 
 
 def decode_access_token(token: str) -> Dict[str, Any]:
@@ -90,6 +129,9 @@ def decode_access_token(token: str) -> Dict[str, Any]:
 def get_current_user(token: str = Depends(oauth2_scheme)) -> Person:
     """Authenticate with a short-lived session that ends before route work."""
     payload = decode_access_token(token)
+    if payload.get("purpose"):
+        # Special-purpose tokens (e.g. download links) are not sessions.
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid authentication token")
     try:
         user_id = int(payload.get("sub"))
     except Exception:
@@ -102,6 +144,11 @@ def get_current_user(token: str = Depends(oauth2_scheme)) -> Person:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="User account is inactive or missing",
+            )
+        if int(payload.get("ver", 0) or 0) != int(user.token_version or 0):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Your password was changed. Please sign in again.",
             )
 
         # Routes only need loaded account fields such as id, name, and role.

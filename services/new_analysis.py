@@ -302,6 +302,10 @@ metrices = {
 
 from services.overlay_renderers import create_overlay, create_premium_overlay, get_unique_output_path, write_react_overlay_page
 from services.report_generator import generate_basic_report
+from services.coach_notes import generate_coach_note
+from services.video_exports import ExportRecorder
+from services.video_encoding import transcode_to_h264
+from services.personal_bests import compare_current_scores_to_previous
 from services.analysis_timeline import build_timeline_sample, create_timeline_payload
 
 
@@ -319,11 +323,15 @@ def analyze_video(
     report: bool = False,
     user_name: Optional[str] = None,
     attempt_number: Optional[int] = None,
+    display_run_number: Optional[int] = None,
     session_date: Optional[str] = None,
     session_number: Optional[int] = None,
     previous_personal_bests: Optional[Dict[str, Any]] = None,
+    first_run_blue_iq: Optional[int] = None,
     progress_callback: Optional[Callable[[int], None]] = None,
     rotation_override: Optional[int] = None,
+    write_coach_note: bool = False,
+    export_variants: bool = False,
 ) -> Dict[str, Any]:
     """Analyze ski video and return performance metrics"""
     _reset_frame_metrics_log()
@@ -367,7 +375,8 @@ def analyze_video(
         _disable_capture_auto_rotation(cap)
 
         target_fps = 10
-        video_fps = int(cap.get(cv2.CAP_PROP_FPS))
+        cap_fps_exact = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
+        video_fps = int(cap_fps_exact)
         if video_fps == 0:
             logger.error("Could not read FPS from the video")
             raise ValueError("Could not read FPS from the video. Please check the file format or path.")
@@ -415,6 +424,11 @@ def analyze_video(
         output_variant = None if overlay_renderer == "opencv" else overlay_renderer
         output_path = get_unique_output_path(outputs_dir, base_name, display_mode, variant=output_variant)
         logger.info(f"Output video path: {output_path}")
+        export_recorder = (
+            ExportRecorder(output_path, output_fps)
+            if export_variants and overlay_renderer == "premium"
+            else None
+        )
 
         if overlay_renderer == "opencv":
             output_size = (TARGET_WIDTH + 720, TARGET_HEIGHT)
@@ -571,9 +585,12 @@ def analyze_video(
                     logger.info(f"Frame shape after {detected_angle}Â° rotation: {frame.shape}")
             
             # STEP 2: Resize and center the rotated frame
+            source_frame = frame
             frame, new_width, new_height = resize_and_center_frame(frame, TARGET_WIDTH, TARGET_HEIGHT)
             clean_display_frame = frame.copy()
             image_centre = new_width // 2
+            if export_recorder is not None:
+                export_recorder.set_geometry(source_frame, new_width, new_height)
             
             if frame_count == 0:
                 logger.info(f"Frame shape after resize: {frame.shape} (width={new_width}, height={new_height})")
@@ -662,6 +679,13 @@ def analyze_video(
                     detected_people.sort(key=lambda p: (-p[6], p[2]))
                     selected_person = detected_people[0]
                     track_id = selected_person[0]
+                    if export_recorder is not None:
+                        export_recorder.record_target(
+                            frame_count,
+                            selected_person[7],
+                            selected_person[8],
+                            selected_person[6],
+                        )
 
                     track_memory["Person1"] = track_id
                     last_seen["Person1"] = frame_count
@@ -1272,7 +1296,7 @@ def analyze_video(
                     "  Lateral score (recent 5)   : "
                     f"{frame_score_details['rotation_lateral_score']:.1f}/240 (30%)",
                     "-" * 72,
-                    "EDGING",
+                    "PARALLELISM",
                     f"  Current frame score        : {frame_edging_score:.1f}/240",
                     f"  Running average (displayed): {Blue_edging_final:.1f}/240",
                     f"  Ski parallelism angle      : {ski_parallelism_angle_text}",
@@ -1303,7 +1327,7 @@ def analyze_video(
                 ))
 
                 if processed_frames % 100 == 0:
-                    logger.debug(f"Current scores - Edging: {Blue_edging_final:.1f}, "
+                    logger.debug(f"Current scores - Parallelism: {Blue_edging_final:.1f}, "
                                f"Rotation: {Blue_rotation_final:.1f}, "
                                f"Balance: {Blue_balance_final:.1f}, "
                                f"Pressure: {Blue_pressure_final:.1f}")
@@ -1318,6 +1342,9 @@ def analyze_video(
                         frame = create_overlay(display_frame, metrices, index_counter, TARGET_WIDTH, logo_path, display_mode)
                         out.write(frame)
                     elif overlay_renderer == "premium":
+                        if export_recorder is not None:
+                            # `frame` carries the coach lines; the clean copy does not.
+                            export_recorder.record_frame(frame_count, clean_display_frame, frame, metrices)
                         frame = create_premium_overlay(
                             display_frame,
                             metrices,
@@ -1326,7 +1353,7 @@ def analyze_video(
                             logo_path,
                             display_mode,
                             athlete_name=user_name,
-                            attempt_number=attempt_number,
+                            attempt_number=display_run_number or attempt_number,
                             session_date=session_date,
                         )
                         out.write(frame)
@@ -1375,6 +1402,8 @@ def analyze_video(
 
     except Exception as e:
         logger.error(f"Error during video processing: {e}")
+        if 'export_recorder' in locals() and export_recorder is not None:
+            export_recorder.abort()
         raise
 
     finally:
@@ -1412,58 +1441,9 @@ def analyze_video(
         #         logger.error(f"ffmpeg transcode failed, keeping mp4v output: {e.stderr}")
         #     except FileNotFoundError:
         #         logger.error("ffmpeg binary not found on PATH, keeping mp4v output")
-        # Transcode to browser-compatible H.264 using libx264 explicitly,
-        # since OpenCV's own fourcc-based encoder selection is unreliable
-        # across platforms (e.g. picks unavailable hardware encoders on EC2).
+        # Transcode to browser-compatible H.264 using libx264 explicitly.
         if 'output_path' in locals() and os.path.exists(output_path):
-            import subprocess
-            import shutil as _shutil
-
-            ffmpeg_bin = _shutil.which("ffmpeg")
-            if not ffmpeg_bin:
-                for candidate in (
-                    r"C:\ffmpeg\bin\ffmpeg.exe",
-                    r"C:\Program Files\ffmpeg\bin\ffmpeg.exe",
-                    "/usr/bin/ffmpeg",
-                    "/usr/local/bin/ffmpeg",
-                ):
-                    if os.path.exists(candidate):
-                        ffmpeg_bin = candidate
-                        break
-
-            if not ffmpeg_bin:
-                logger.error(
-                    "ffmpeg not found on PATH or in known install locations. "
-                    "Output remains mp4v and will NOT play in browsers."
-                )
-                raise RuntimeError(
-                    "ffmpeg is required to produce a browser-playable video but was not found on this machine."
-                )
-
-            temp_transcode_path = output_path + ".h264.mp4"
-            try:
-                proc = subprocess.run(
-                    [
-                        ffmpeg_bin, "-y",
-                        "-i", output_path,
-                        "-c:v", "libx264",
-                        "-preset", "medium",
-                        "-crf", "23",
-                        "-pix_fmt", "yuv420p",
-                        "-movflags", "+faststart",
-                        temp_transcode_path,
-                    ],
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                )
-                if not os.path.exists(temp_transcode_path) or os.path.getsize(temp_transcode_path) == 0:
-                    raise RuntimeError(f"ffmpeg produced no usable output. stderr: {proc.stderr}")
-                os.replace(temp_transcode_path, output_path)
-                logger.info(f"Transcoded output video to H.264 using: {ffmpeg_bin}")
-            except subprocess.CalledProcessError as e:
-                logger.error(f"ffmpeg transcode failed (exit {e.returncode}): {e.stderr}")
-                raise RuntimeError(f"ffmpeg transcode failed: {e.stderr}") from e
+            transcode_to_h264(output_path)
     # Final calculations
     logger.info("Calculating final scores...")
     try:
@@ -1530,19 +1510,63 @@ def analyze_video(
         }
         if 'snapshot_path' in locals() and snapshot_saved and os.path.exists(snapshot_path):
             result["snapshot_path"] = snapshot_path
+        if export_recorder is not None:
+            manifest = export_recorder.finish(
+                source_path=video_path,
+                rotation=detected_angle,
+                source_fps=cap_fps_exact,
+                display_mode=display_mode,
+                blue_iq=(
+                    Blue_pressure_final
+                    + Blue_balance_final
+                    + Blue_rotation_final
+                    + Blue_edging_final
+                ) / 4,
+                label={
+                    "athlete_name": user_name,
+                    "attempt_number": display_run_number or attempt_number,
+                    "session_date": session_date,
+                },
+            )
+            if manifest:
+                result["export_manifest"] = manifest
         if overlay_renderer == "react":
             react_overlay_path = write_react_overlay_page(output_path, result, display_mode)
             result["react_overlay_path"] = react_overlay_path
+        if write_coach_note:
+            final_scores = {
+                "pressure": Blue_pressure_final,
+                "balance": Blue_balance_final,
+                "rotation": Blue_rotation_final,
+                "edging": Blue_edging_final,
+                "blue_iq": (
+                    Blue_pressure_final
+                    + Blue_balance_final
+                    + Blue_rotation_final
+                    + Blue_edging_final
+                ) / 4,
+            }
+            comparisons = compare_current_scores_to_previous(
+                final_scores,
+                previous_personal_bests or {},
+                session_date=session_date,
+            )
+            note, note_source = generate_coach_note(final_scores, comparisons)
+            result["instructor_notes"] = note
+            result["notes_source"] = note_source
+            logger.info("Coach note generated (%s)", note_source)
         if report:
             report_result = generate_basic_report(
                 result,
                 score_timeline,
                 context={
                     "user_name": user_name,
-                    "attempt_number": attempt_number,
+                    "attempt_number": display_run_number or attempt_number,
                     "session_date": session_date,
                     "session_number": session_number,
                     "previous_personal_bests": previous_personal_bests or {},
+                    "first_run_blue_iq": first_run_blue_iq,
+                    "instructor_notes": result.get("instructor_notes"),
                 },
             )
             result["report_text"] = report_result["report_text"]
@@ -1554,6 +1578,8 @@ def analyze_video(
 
     except Exception as e:
         logger.error(f"Error calculating final scores: {e}")
+        if export_recorder is not None:
+            export_recorder.abort()
         raise
 
 

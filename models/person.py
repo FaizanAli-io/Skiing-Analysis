@@ -15,6 +15,7 @@ class Person(Base):
     password_hash = Column(String(255), nullable=True)
     role = Column(String(20), default="client", nullable=False)
     is_active = Column(Boolean, default=True, nullable=False)
+    token_version = Column(Integer, default=0, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 

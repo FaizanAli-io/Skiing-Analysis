@@ -543,7 +543,7 @@ def write_react_overlay_page(output_path, result_data, display_mode):
             e(MetricCard, {{ name: 'Pressure', score: data.pressure_score }}),
             e(MetricCard, {{ name: 'Balance',  score: data.balance_score }}),
             e(MetricCard, {{ name: 'Rotation', score: data.rotation_score }}),
-            e(MetricCard, {{ name: 'Edging',   score: data.edging_score }})
+            e(MetricCard, {{ name: 'Parallelism', score: data.edging_score }})
           ),
           e('div', {{ className: 'divider' }}),
           e('div', {{ className: 'section-header' }},
@@ -720,7 +720,7 @@ def create_premium_overlay(
       - Performance Profile section header
       - Blue IQ card (score + tier tag right-aligned)
       - Level pills
-      - Four metric cards (Pressure, Balance, Rotation, Edging)
+      - Four metric cards (Pressure, Balance, Rotation, Parallelism)
         Each: label left | score+tag right | progress bar bottom
       - Divider
       - This Run / Live Run Metrics section header
@@ -989,10 +989,11 @@ def create_premium_overlay(
         ("Pressure", metrics["Blue_pressure_final"]),
         ("Balance",  metrics["Blue_balance_final"]),
         ("Rotation", metrics["Blue_rotation_final"]),
-        ("Edging",   metrics["Blue_edging_final"]),
+        ("Parallelism", metrics["Blue_edging_final"]),
     ]
+    # Cards are labelled with display names; "edging" is shown as Parallelism.
     metric_colors = {
-        label.title(): color
+        ("Parallelism" if label == "edging" else label.title()): color
         for label, color in METRIC_COLORS_RGB.items()
     }
 
@@ -1055,7 +1056,7 @@ def create_premium_overlay(
     if display_mode == "coach":
         # Coach: 2×2 live metric grid
         live_items = [
-            ("Edging",         f"{_latest_metric_value(metrics,'ski_angle')}\u00b0"),
+            ("Parallelism",    f"{_latest_metric_value(metrics,'ski_angle')}\u00b0"),
             ("Pressure",       f"{_latest_metric_value(metrics,'pressure_angle')}\u00b0"),
             ("Rotation",       f"{_latest_metric_value(metrics,'rotation_angle')}\u00b0"),
             ("Balance",        f"{_latest_metric_value(metrics,'balance_angle')}\u00b0"),
@@ -1206,7 +1207,7 @@ def create_overlay(frame, metrics, frame_number, TARGET_WIDTH, logo_path=None, d
             ("Pressure", metrics["Blue_pressure_final"]),
             ("Balance", metrics["Blue_balance_final"]),
             ("Rotation", metrics["Blue_rotation_final"]),
-            ("Edging", metrics["Blue_edging_final"]),
+            ("Parallelism", metrics["Blue_edging_final"]),
         ]
         row_y = score_panel_y + 204
         for label, score in metrics_to_draw:
@@ -1219,7 +1220,7 @@ def create_overlay(frame, metrics, frame_number, TARGET_WIDTH, logo_path=None, d
 
         live_metrics = [
             ("Rotation", f"{_latest_metric_value(metrics, 'rotation_angle')} deg"),
-            ("Edging", f"{_latest_metric_value(metrics, 'ski_angle')} deg"),
+            ("Parallelism", f"{_latest_metric_value(metrics, 'ski_angle')} deg"),
             ("Pressure", f"{_latest_metric_value(metrics, 'pressure_angle')} deg"),
         ]
         metric_y = 638

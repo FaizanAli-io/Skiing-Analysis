@@ -143,7 +143,9 @@ class TestFullSystemE2E(unittest.TestCase):
         att = attempts[0]
         self.assertIn("client_name", att)
         self.assertEqual(att["client_name"], "Client Bilal")
-        self.assertEqual(att["is_archived"], False)
+        # Clients only ever see live runs; archive state is admin-only.
+        self.assertNotIn("is_archived", att)
+        self.assertNotIn("output_video_path", att)
 
     def test_admin_attempts_contains_client_name(self):
         """Test /api/admin/attempts attaches client_name to all attempt cards."""

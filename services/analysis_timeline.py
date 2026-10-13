@@ -329,12 +329,12 @@ TIMELINE_PARAMETER_CONFIG: Dict[str, Any] = {
         ],
     },
     "edging": {
-        "label": "Edging",
+        "label": "Parallelism",
         "color": "#6aafff",
         "score_series": [
             {
                 "key": "overall",
-                "label": "Edging score",
+                "label": "Parallelism score",
                 "path": "pillars.edging.score",
                 "color": "#eef6ff",
                 "unit": "/240",
@@ -389,7 +389,7 @@ TIMELINE_PARAMETER_CONFIG: Dict[str, Any] = {
                     "directions lowers it."
                 ),
                 "mapping": "1 deg difference or less = 240; 20 deg or more = 60",
-                "weight": "70% of Edging",
+                "weight": "70% of Parallelism",
             },
             {
                 "label": "Lateral movement",
@@ -400,7 +400,7 @@ TIMELINE_PARAMETER_CONFIG: Dict[str, Any] = {
                     "below 30 px/frame receives a stronger reduction."
                 ),
                 "mapping": "0 px/frame = 60; 30 px/frame = 150; 45 px/frame or more = 240",
-                "weight": "30% of Edging",
+                "weight": "30% of Parallelism",
             },
         ],
     },
@@ -454,7 +454,22 @@ def sanitize_parameter_config(config: Optional[Dict[str, Any]]) -> Dict[str, Any
                 "mapping",
                 reference.get("mapping", ""),
             )
+    # The "edging" pillar is now presented as Parallelism, including on
+    # timelines saved before the rename.
+    _rename_labels(sanitized.get("edging"), "Edging", "Parallelism")
     return sanitized
+
+
+def _rename_labels(node: Any, old: str, new: str) -> None:
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if isinstance(value, str) and key in {"label", "weight", "explanation", "mapping"}:
+                node[key] = value.replace(old, new)
+            else:
+                _rename_labels(value, old, new)
+    elif isinstance(node, list):
+        for item in node:
+            _rename_labels(item, old, new)
 
 
 def _number(value: Any, multiplier: float = 1.0) -> Optional[float]:

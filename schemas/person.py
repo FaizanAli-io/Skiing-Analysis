@@ -16,6 +16,10 @@ class PersonOut(PersonCreate):
         
 
 
+class AdminPersonOut(PersonOut):
+    run_count: int = 0
+
+
 class PersonIDName(BaseModel):
     id: int
     name: str

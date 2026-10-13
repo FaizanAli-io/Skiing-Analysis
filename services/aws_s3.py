@@ -9,6 +9,9 @@ from botocore.exceptions import ClientError
 from typing import Optional
 import logging
 from datetime import datetime
+from dotenv import load_dotenv
+
+load_dotenv()
 
 logger = logging.getLogger(__name__)
 
@@ -148,7 +151,12 @@ class S3Manager:
             return None
     
     @staticmethod
-    def generate_presigned_url(bucket: str, s3_key: str, expiration: int = 3600) -> Optional[str]:
+    def generate_presigned_url(
+        bucket: str,
+        s3_key: str,
+        expiration: int = 3600,
+        filename: Optional[str] = None,
+    ) -> Optional[str]:
         """
         Generate a presigned URL for temporary access to S3 object
         
@@ -156,6 +164,7 @@ class S3Manager:
             bucket: S3 bucket name
             s3_key: S3 key (path in bucket)
             expiration: URL expiration time in seconds (default 1 hour)
+            filename: If provided, sets Content-Disposition attachment with this filename
             
         Returns:
             Presigned URL on success, None on failure
@@ -164,13 +173,16 @@ class S3Manager:
             return None
         
         try:
+            params = {
+                'Bucket': bucket,
+                'Key': s3_key,
+            }
+            if filename:
+                params['ResponseContentDisposition'] = f'attachment; filename="{filename}"'
             url = s3_client.generate_presigned_url(
                 'get_object',
-                Params={
-                    'Bucket': bucket,
-                    'Key': s3_key
-                },
-                ExpiresIn=expiration
+                Params=params,
+                ExpiresIn=expiration,
             )
             return url
         except ClientError as e:
@@ -179,10 +191,17 @@ class S3Manager:
     
     @staticmethod
     def get_video_url(s3_key: str, expiration: int = 3600) -> Optional[str]:
-        """Get presigned URL for a video"""
+        """Get presigned URL for streaming a video in browser"""
         if not AWS_S3_BUCKET:
             return None
         return S3Manager.generate_presigned_url(AWS_S3_BUCKET, s3_key, expiration)
+
+    @staticmethod
+    def get_video_download_url(s3_key: str, filename: Optional[str] = None, expiration: int = 3600) -> Optional[str]:
+        """Get presigned URL for downloading a video as an attachment"""
+        if not AWS_S3_BUCKET:
+            return None
+        return S3Manager.generate_presigned_url(AWS_S3_BUCKET, s3_key, expiration, filename=filename or "ski_analysis.mp4")
     
     @staticmethod
     def get_report_url(s3_key: str, expiration: int = 3600) -> Optional[str]:

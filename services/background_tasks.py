@@ -8,6 +8,7 @@ from sqlalchemy.exc import OperationalError
 
 from database import SessionLocal
 from services.new_analysis import analyze_video
+from services.video_exports import submit_exports
 from services.aws_s3 import S3Manager, upload_analysis_files
 import crud.person as person_crud
 import crud.job as job_crud
@@ -170,6 +171,8 @@ def _build_analysis_record(
         "s3_snapshot_key": (
             s3_uploads.get("snapshot_s3_key") if s3_enabled else None
         ),
+        "instructor_notes": results.get("instructor_notes"),
+        "notes_source": results.get("notes_source"),
         "display_mode": display_mode,
         "overlay_renderer": "premium",
         "blue_iq_score": float(
@@ -314,8 +317,12 @@ def _run_pipeline_after_download(
         session_date=session_date,
         session_number=personal_best_context["session_number"],
         previous_personal_bests=personal_best_context["personal_bests"],
+        first_run_blue_iq=personal_best_context.get("first_run_blue_iq"),
+        display_run_number=personal_best_context.get("client_run_number"),
         progress_callback=lambda p: update_job_progress(job_id, p),
         rotation_override=rotation_override,
+        write_coach_note=True,
+        export_variants=True,
     )
 
     update_job_progress(job_id, 70)
@@ -374,16 +381,32 @@ def _run_pipeline_after_download(
         analysis_id,
     )
 
+    # Render the other download versions on the export worker pool. They
+    # re-read the input video, so the export finalizer deletes it instead.
+    manifest = results.get("export_manifest")
+    exports_queued = False
+    if manifest:
+        try:
+            submit_exports(analysis_id, manifest, cleanup_paths=[file_path])
+            exports_queued = True
+            logger.info("Job %s: Download versions queued for background rendering", job_id)
+        except Exception as exc:
+            logger.error("Job %s: Could not queue download versions: %s", job_id, exc)
+
     # Clean up local disk files to prevent server disk from filling up
     try:
-        # Always remove the temporary input video (analysis is finished)
-        if file_path and os.path.exists(file_path):
+        if not exports_queued and file_path and os.path.exists(file_path):
             os.remove(file_path)
             logger.info("Job %s: Cleaned up temporary input file %s", job_id, file_path)
 
         # If S3 is enabled, remove local output copies since they are safely stored in S3
         if s3_enabled and s3_video_url:
-            for p in [results.get("output_path"), results.get("report_path"), results.get("snapshot_path")]:
+            uploaded_locals = [
+                results.get("output_path"),
+                results.get("report_path"),
+                results.get("snapshot_path"),
+            ]
+            for p in uploaded_locals:
                 if p and os.path.exists(p):
                     os.remove(p)
                     logger.info("Job %s: Cleaned up local copy %s (saved in S3)", job_id, p)

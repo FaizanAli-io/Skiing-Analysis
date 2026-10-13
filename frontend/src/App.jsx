@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import TrendsChart from "./TrendsChart";
+import { scoreBand } from "./scoreBands";
 import RunAnalysisGraph from "./RunAnalysisGraph";
 import logoImg from "../../services/bluerun.png";
 
@@ -10,7 +11,7 @@ const SCORE_METRICS = [
   ["pressure", "Pressure"],
   ["balance", "Balance"],
   ["rotation", "Rotation"],
-  ["edging", "Edging"],
+  ["edging", "Parallelism"],
 ];
 
 function normalizeSearchText(value) {
@@ -101,6 +102,17 @@ function clientSearchScore(client, query) {
   }, 0);
 }
 
+// Clients ranked best-first by fuzzy name/email match; non-matches dropped.
+function rankClients(clients, query, limit = Infinity) {
+  if (!normalizeSearchText(query)) return [];
+  return clients
+    .map((client) => ({ client, score: clientSearchScore(client, query) }))
+    .filter(({ score }) => Number.isFinite(score))
+    .sort((a, b) => a.score - b.score || a.client.name.localeCompare(b.client.name))
+    .slice(0, limit)
+    .map(({ client }) => client);
+}
+
 function useAutoRefresh(refresh, enabled = true) {
   const refreshRef = useRef(refresh);
 
@@ -183,7 +195,18 @@ function handleAuthExpired(isAdmin = false) {
   routeTo(isCurrentlyAdmin ? "/admin-login?expired=1" : "/login?expired=1");
 }
 
-async function api(path, { method = "GET", token, body, isForm = false } = {}) {
+// Views capture the token when they render. After a password change the
+// stored token is replaced (and the old one revoked), so always send the
+// newest stored token for this portal; this also covers other open tabs.
+function resolveToken(token) {
+  if (!token) return token;
+  if (token === getToken("admin") || token === getToken("client")) return token;
+  const kind = window.location.pathname.startsWith("/admin") ? "admin" : "client";
+  return getToken(kind) || token;
+}
+
+async function api(path, { method = "GET", token: requestedToken, body, isForm = false } = {}) {
+  const token = resolveToken(requestedToken);
   const isFormData = isForm || (typeof FormData !== "undefined" && body instanceof FormData);
   const headers = {};
   if (token) headers.Authorization = `Bearer ${token}`;
@@ -195,7 +218,9 @@ async function api(path, { method = "GET", token, body, isForm = false } = {}) {
     body: isFormData ? body : body ? JSON.stringify(body) : undefined,
   });
 
-  if (response.status === 401) {
+  // A 401 only means "session expired" when a session was sent; sign-in and
+  // password-reset calls report their own errors.
+  if (response.status === 401 && token) {
     handleAuthExpired();
     throw new Error("Your session has expired. Redirecting to login...");
   }
@@ -219,22 +244,6 @@ function fileUrl(value) {
   return `${API_BASE}/outputs/${fileName}`;
 }
 
-function scoreBand(score) {
-  const value = Number(score || 0);
-  if (value >= 225) return ["Mastering 3", "mastering"];
-  if (value >= 210) return ["Mastering 2", "mastering"];
-  if (value >= 195) return ["Mastering 1", "mastering"];
-  if (value >= 180) return ["Advancing 3", "advancing"];
-  if (value >= 165) return ["Advancing 2", "advancing"];
-  if (value >= 150) return ["Advancing 1", "advancing"];
-  if (value >= 135) return ["Progressing 3", "progressing"];
-  if (value >= 120) return ["Progressing 2", "progressing"];
-  if (value >= 105) return ["Progressing 1", "progressing"];
-  if (value >= 90) return ["Building 3", "building"];
-  if (value >= 75) return ["Building 2", "building"];
-  return ["Building 1", "building"];
-}
-
 function formatDate(value) {
   if (!value || value === "Unknown date") return "Date unavailable";
   const parsed = new Date(`${String(value).slice(0, 10)}T00:00:00`);
@@ -254,6 +263,15 @@ function recordContext(record) {
   return parts.join(" / ");
 }
 
+function getInitials(name) {
+  if (!name) return "";
+  const parts = String(name).trim().split(/\s+/).filter(Boolean);
+  if (!parts.length) return "";
+  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
+  return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
+}
+
+
 function comparisonLabel(comparison) {
   if (!comparison) return "";
   if (comparison.status === "baseline") return "Baseline established";
@@ -263,7 +281,43 @@ function comparisonLabel(comparison) {
     const gain = previousScore == null ? 0 : comparison.current_score - previousScore;
     return gain > 0 ? `New personal best +${gain}` : "New personal best";
   }
-  return `PB ${comparison.personal_best_score} / ${comparison.points_below} points below`;
+  return `PB ${comparison.personal_best_score} · ${comparison.points_below} points below`;
+}
+
+function formatComparisonStatus(comparison, isNewPb = false) {
+  if (isNewPb || comparison?.status === "new_personal_best") {
+    const gain = comparison?.previous_best?.score != null ? comparison.current_score - comparison.previous_best.score : 0;
+    return {
+      text: gain > 0 ? `New personal best +${gain}` : "New personal best",
+      status: "pb",
+    };
+  }
+  if (!comparison || comparison.status === "baseline") {
+    return { text: "Baseline established", status: "baseline" };
+  }
+  if (comparison.status === "matches_personal_best") {
+    return { text: "Matches personal best", status: "matches" };
+  }
+  const pbScore = comparison.personal_best_score;
+  const pts = comparison.points_below;
+  return {
+    text: `PB ${pbScore} · ${pts} point${pts === 1 ? "" : "s"} below`,
+    status: "below",
+  };
+}
+
+function useAuthConfig() {
+  const [config, setConfig] = useState({ email_verification_required: false, password_reset_available: false });
+  useEffect(() => {
+    let cancelled = false;
+    api("/auth/config")
+      .then((data) => !cancelled && setConfig(data))
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  return config;
 }
 
 function AuthShell({ children, mode }) {
@@ -289,21 +343,57 @@ function AuthForm({ type }) {
   const isAdmin = type === "admin";
   const [form, setForm] = useState({ name: "", email: "", phone: "", password: "" });
   const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
   const [loading, setLoading] = useState(false);
+  const [codeStep, setCodeStep] = useState(false);
+  const [code, setCode] = useState("");
+  const authConfig = useAuthConfig();
   const isExpired = window.location.search.includes("expired=1");
+  const isReset = window.location.search.includes("reset=1");
 
-  const title = isSignup ? "Create your account" : isAdmin ? "Admin sign in" : "Welcome back";
+  const title = codeStep ? "Check your email" : isSignup ? "Create your account" : isAdmin ? "Admin sign in" : "Welcome back";
+
+  async function requestSignupCode() {
+    const result = await api("/auth/signup/request-code", {
+      method: "POST",
+      body: { name: form.name, email: form.email, phone: form.phone, password: form.password },
+    });
+    setNotice(result.message);
+    setCodeStep(true);
+  }
+
+  async function resendCode() {
+    setError("");
+    setNotice("");
+    setLoading(true);
+    try {
+      await requestSignupCode();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  }
 
   async function submit(event) {
     event.preventDefault();
     setError("");
     setLoading(true);
     try {
-      const endpoint = isSignup ? "/auth/signup" : "/auth/login";
-      const payload = isSignup
-        ? { name: form.name, email: form.email, phone: form.phone, password: form.password }
-        : { email: form.email, password: form.password };
-      const result = await api(endpoint, { method: "POST", body: payload });
+      if (isSignup && authConfig.email_verification_required && !codeStep) {
+        await requestSignupCode();
+        return;
+      }
+      let result;
+      if (isSignup && codeStep) {
+        result = await api("/auth/signup/verify", { method: "POST", body: { email: form.email, code } });
+      } else {
+        const endpoint = isSignup ? "/auth/signup" : "/auth/login";
+        const payload = isSignup
+          ? { name: form.name, email: form.email, phone: form.phone, password: form.password }
+          : { email: form.email, password: form.password };
+        result = await api(endpoint, { method: "POST", body: payload });
+      }
       const expectedRole = isAdmin ? "admin" : "client";
       if (result.user.role !== expectedRole) {
         throw new Error(isAdmin ? "This account is not an admin account." : "Please use the admin sign-in page for admin accounts.");
@@ -323,6 +413,27 @@ function AuthForm({ type }) {
         <Logo />
         <p className="eyebrow">{isSignup ? "Client access" : isAdmin ? "Admin portal" : "Client portal"}</p>
         <h2>{title}</h2>
+        {codeStep ? (
+          <form onSubmit={submit}>
+            {notice && <div className="notice">{notice}</div>}
+            <label>Verification code</label>
+            <input
+              className="code-input"
+              inputMode="numeric"
+              autoComplete="one-time-code"
+              maxLength={6}
+              value={code}
+              onChange={(e) => setCode(e.target.value.replace(/\D/g, ""))}
+              required
+            />
+            {error && <div className="alert">{error}</div>}
+            <button className="primary-button" disabled={loading || code.length !== 6}>{loading ? "Working..." : "Verify and create account"}</button>
+            <div className="auth-inline-actions">
+              <button type="button" className="ghost-link" onClick={resendCode} disabled={loading}>Send a new code</button>
+              <button type="button" className="ghost-link" onClick={() => { setCodeStep(false); setCode(""); setNotice(""); setError(""); }}>Change details</button>
+            </div>
+          </form>
+        ) : (
         <form onSubmit={submit}>
           {isSignup && (
             <>
@@ -334,8 +445,18 @@ function AuthForm({ type }) {
           )}
           <label>Email</label>
           <input type="email" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} required />
-          <label>Password</label>
+          <div className="label-row">
+            <label>Password</label>
+            {!isSignup && authConfig.password_reset_available && (
+              <button type="button" className="ghost-link small" onClick={() => routeTo(isAdmin ? "/forgot-password?admin=1" : "/forgot-password")}>
+                Forgot password?
+              </button>
+            )}
+          </div>
           <input type="password" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} minLength={8} required />
+          {isReset && !error && (
+            <div className="notice success">Your password has been reset. Please sign in.</div>
+          )}
           {isExpired && !error && (
             <div className="alert" style={{ background: "rgba(245, 158, 11, 0.15)", borderColor: "#f59e0b", color: "#fbbf24" }}>
               Your session has expired. Please sign in again.
@@ -344,7 +465,8 @@ function AuthForm({ type }) {
           {error && <div className="alert">{error}</div>}
           <button className="primary-button" disabled={loading}>{loading ? "Working..." : title}</button>
         </form>
-        {!isAdmin && (
+        )}
+        {!isAdmin && !codeStep && (
           <p className="switch-link">
             {isSignup ? "Already have an account?" : "New to Bluerun?"}{" "}
             <button onClick={() => routeTo(isSignup ? "/login" : "/signup")}>{isSignup ? "Sign in" : "Create account"}</button>
@@ -358,16 +480,248 @@ function AuthForm({ type }) {
   );
 }
 
-function AppHeader({ title, subtitle, role, onLogout }) {
+function ForgotPasswordForm() {
+  const isAdmin = window.location.search.includes("admin=1");
+  const loginPath = isAdmin ? "/admin-login" : "/login";
+  const [step, setStep] = useState("email");
+  const [email, setEmail] = useState("");
+  const [code, setCode] = useState("");
+  const [password, setPassword] = useState("");
+  const [confirm, setConfirm] = useState("");
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  async function requestCode(event) {
+    if (event) event.preventDefault();
+    setError("");
+    setLoading(true);
+    try {
+      const result = await api("/auth/password/forgot", { method: "POST", body: { email } });
+      setNotice(result.message);
+      setStep("reset");
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function resetPassword(event) {
+    event.preventDefault();
+    setError("");
+    if (password !== confirm) {
+      setError("The passwords do not match.");
+      return;
+    }
+    setLoading(true);
+    try {
+      await api("/auth/password/reset", { method: "POST", body: { email, code, new_password: password } });
+      routeTo(`${loginPath}?reset=1`);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <AuthShell mode={isAdmin ? "admin" : "client"}>
+      <div className="form-card">
+        <Logo />
+        <p className="eyebrow">Account recovery</p>
+        <h2>{step === "email" ? "Reset your password" : "Enter your code"}</h2>
+        {step === "email" ? (
+          <form onSubmit={requestCode}>
+            <p className="form-intro">Enter the email you sign in with and we will send you a 6-digit code.</p>
+            <label>Email</label>
+            <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} autoComplete="email" required />
+            {error && <div className="alert">{error}</div>}
+            <button className="primary-button" disabled={loading}>{loading ? "Sending..." : "Send reset code"}</button>
+          </form>
+        ) : (
+          <form onSubmit={resetPassword}>
+            {notice && <div className="notice">{notice}</div>}
+            <label>Reset code</label>
+            <input
+              className="code-input"
+              inputMode="numeric"
+              autoComplete="one-time-code"
+              maxLength={6}
+              value={code}
+              onChange={(e) => setCode(e.target.value.replace(/\D/g, ""))}
+              required
+            />
+            <PasswordField label="New password" value={password} autoComplete="new-password" onChange={setPassword} />
+            <PasswordField label="Confirm new password" value={confirm} autoComplete="new-password" onChange={setConfirm} />
+            {error && <div className="alert">{error}</div>}
+            <button className="primary-button" disabled={loading || code.length !== 6}>{loading ? "Saving..." : "Set new password"}</button>
+            <div className="auth-inline-actions">
+              <button type="button" className="ghost-link" onClick={() => requestCode()} disabled={loading}>Send a new code</button>
+            </div>
+          </form>
+        )}
+        <button className="ghost-link" onClick={() => routeTo(loginPath)}>Back to sign in</button>
+      </div>
+    </AuthShell>
+  );
+}
+
+function PasswordField({ label, value, onChange, autoComplete, minLength = 8 }) {
+  const [visible, setVisible] = useState(false);
+  return (
+    <>
+      <label>{label}</label>
+      <div className="password-field">
+        <input
+          type={visible ? "text" : "password"}
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          minLength={minLength}
+          autoComplete={autoComplete}
+          required
+        />
+        <button type="button" className="password-toggle" onClick={() => setVisible((v) => !v)}>
+          {visible ? "Hide" : "Show"}
+        </button>
+      </div>
+    </>
+  );
+}
+
+function ChangePasswordModal({ tokenKind, onClose }) {
+  const [form, setForm] = useState({ current: "", next: "", confirm: "" });
+  const [error, setError] = useState("");
+  const [done, setDone] = useState(false);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    const onKey = (event) => event.key === "Escape" && onClose();
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  async function submit(event) {
+    event.preventDefault();
+    setError("");
+    if (form.next !== form.confirm) {
+      setError("The new passwords do not match.");
+      return;
+    }
+    setSaving(true);
+    try {
+      const result = await api("/auth/password/change", {
+        method: "POST",
+        token: getToken(tokenKind),
+        body: { current_password: form.current, new_password: form.next },
+      });
+      // Changing the password signs out other sessions; keep this one.
+      setToken(result.access_token, tokenKind);
+      setDone(true);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="modal-backdrop" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
+      <div className="modal-card" role="dialog" aria-modal="true" aria-labelledby="change-password-title">
+        <div className="modal-header">
+          <h2 id="change-password-title">Change password</h2>
+          <button type="button" className="modal-close" onClick={onClose} aria-label="Close">×</button>
+        </div>
+        {done ? (
+          <>
+            <div className="notice success">Your password has been updated. Other devices have been signed out.</div>
+            <button type="button" className="primary-button" onClick={onClose}>Done</button>
+          </>
+        ) : (
+          <form onSubmit={submit}>
+            <PasswordField label="Current password" value={form.current} minLength={1} autoComplete="current-password" onChange={(v) => setForm({ ...form, current: v })} />
+            <PasswordField label="New password" value={form.next} autoComplete="new-password" onChange={(v) => setForm({ ...form, next: v })} />
+            <PasswordField label="Confirm new password" value={form.confirm} autoComplete="new-password" onChange={(v) => setForm({ ...form, confirm: v })} />
+            <p className="field-hint">At least 8 characters.</p>
+            {error && <div className="alert">{error}</div>}
+            <button className="primary-button" disabled={saving}>{saving ? "Saving..." : "Update password"}</button>
+          </form>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function SettingsMenu({ tokenKind, onLogout }) {
+  const [open, setOpen] = useState(false);
+  const [showPasswordModal, setShowPasswordModal] = useState(false);
+  const menuRef = useRef(null);
+
+  useEffect(() => {
+    if (!open) return undefined;
+    const onDown = (event) => {
+      if (menuRef.current && !menuRef.current.contains(event.target)) setOpen(false);
+    };
+    const onKey = (event) => event.key === "Escape" && setOpen(false);
+    document.addEventListener("mousedown", onDown);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
+  return (
+    <div className="settings-menu" ref={menuRef}>
+      <button
+        type="button"
+        className="secondary-button app-header-logout-btn settings-trigger"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        onClick={() => setOpen((v) => !v)}
+      >
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <circle cx="12" cy="12" r="3" />
+          <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+        </svg>
+        <span>Settings</span>
+      </button>
+      {open && (
+        <div className="settings-dropdown" role="menu">
+          <button
+            type="button"
+            role="menuitem"
+            onClick={() => {
+              setOpen(false);
+              setShowPasswordModal(true);
+            }}
+          >
+            Change password
+          </button>
+          <button type="button" role="menuitem" className="danger" onClick={onLogout}>
+            Log out
+          </button>
+        </div>
+      )}
+      {showPasswordModal && (
+        <ChangePasswordModal tokenKind={tokenKind} onClose={() => setShowPasswordModal(false)} />
+      )}
+    </div>
+  );
+}
+
+function AppHeader({ title, subtitle, role, onLogout, tokenKind = "admin" }) {
   return (
     <header className="app-header">
-      <Logo />
-      <div>
-        <p className="eyebrow">{role}</p>
-        <h1>{title}</h1>
-        <p>{subtitle}</p>
+      <div className="app-header-left">
+        <Logo />
+        <div className="app-header-text">
+          <p className="app-header-eyebrow eyebrow">{role ? role.toUpperCase() : "ADMIN DASHBOARD"}</p>
+          <h1 className="app-header-title">{title || "BLUERUN PORTAL"}</h1>
+          <p className="app-header-subtitle">{subtitle || "Manage clients, process runs, and track performance across all athletes."}</p>
+        </div>
       </div>
-      <button className="secondary-button" onClick={onLogout}>Logout</button>
+      <SettingsMenu tokenKind={tokenKind} onLogout={onLogout} />
     </header>
   );
 }
@@ -466,73 +820,550 @@ function LeaderboardPanel({ leaderboards }) {
   );
 }
 
-function AttemptCard({ attempt, clientName: clientNameProp, onViewAnalysis, onArchive, onRestore, onDelete }) {
+const DOWNLOAD_FORMATS = [
+  { key: "original", label: "Original", detail: "16:9 with score panel" },
+  { key: "vertical", label: "Vertical", detail: "9:16 for Reels, TikTok, Stories" },
+  { key: "square", label: "Square", detail: "1:1 for Instagram & Facebook feed" },
+];
+
+const DOWNLOAD_MODES = [
+  { key: "athlete", label: "Athlete", hint: "Clean footage" },
+  { key: "coach", label: "Coach", hint: "With technique lines" },
+];
+
+// Keep in step with MAX_NOTE_CHARS in services/coach_notes.py.
+const NOTE_MAX_CHARS = 280;
+
+const NOTE_SOURCE_LABELS = {
+  ai: "AI draft",
+  template: "Auto draft",
+  coach: "Edited by coach",
+};
+
+async function downloadAttemptVideo(attemptId, mode, format, tokenKind) {
+  const data = await api(`/videos/${attemptId}/download-url?mode=${mode}&format=${format}`, { token: getToken(tokenKind) });
+  const url = String(data.download_url).startsWith("http") ? data.download_url : `${API_BASE}${data.download_url}`;
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = data.filename || "";
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  return data.filename;
+}
+
+function DownloadMenu({ attempt, tokenKind }) {
+  const available = attempt.available_downloads || {};
+  const defaultMode = (available.coach || []).includes("original") ? "coach" : "athlete";
+  const [open, setOpen] = useState(false);
+  const [mode, setMode] = useState(defaultMode);
+  const [busyFormat, setBusyFormat] = useState("");
+  const [error, setError] = useState("");
+  const [started, setStarted] = useState("");
+  const menuRef = useRef(null);
+  const pending = Boolean(attempt.downloads_pending);
+
+  useEffect(() => {
+    if (!open) return undefined;
+    const onDown = (event) => {
+      if (menuRef.current && !menuRef.current.contains(event.target)) setOpen(false);
+    };
+    const onKey = (event) => event.key === "Escape" && setOpen(false);
+    document.addEventListener("mousedown", onDown);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
+  useEffect(() => {
+    if (!started) return undefined;
+    const timer = window.setTimeout(() => {
+      setStarted("");
+      setOpen(false);
+    }, 3500);
+    return () => window.clearTimeout(timer);
+  }, [started]);
+
+  async function choose(format) {
+    setError("");
+    setStarted("");
+    setBusyFormat(format);
+    try {
+      const filename = await downloadAttemptVideo(attempt.id, mode, format, tokenKind);
+      setStarted(filename || "your video");
+    } catch (err) {
+      setError(err.message || "Download failed");
+    } finally {
+      setBusyFormat("");
+    }
+  }
+
+  function statusFor(format) {
+    if ((available[mode] || []).includes(format.key)) return { ready: true, text: format.detail };
+    if (pending) return { ready: false, text: "Preparing in the background..." };
+    return { ready: false, text: "Not available for this run" };
+  }
+
+  return (
+    <div className="download-menu" ref={menuRef}>
+      <button
+        type="button"
+        className="btn-action-2x2 action-download-btn"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        onClick={() => setOpen((v) => !v)}
+        title="Download this run's video"
+      >
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+          <polyline points="7 10 12 15 17 10" />
+          <line x1="12" y1="15" x2="12" y2="3" />
+        </svg>
+        <span>Download</span>
+      </button>
+      {open && (
+        <div className="download-dropdown" role="menu">
+          <p className="download-dropdown-title">Download video</p>
+          <div className="download-mode-toggle" role="radiogroup" aria-label="Video style">
+            {DOWNLOAD_MODES.map((option) => (
+              <button
+                key={option.key}
+                type="button"
+                role="radio"
+                aria-checked={mode === option.key}
+                className={mode === option.key ? "is-active" : ""}
+                onClick={() => {
+                  setMode(option.key);
+                  setError("");
+                }}
+              >
+                <strong>{option.label}</strong>
+                <small>{option.hint}</small>
+              </button>
+            ))}
+          </div>
+          {DOWNLOAD_FORMATS.map((format) => {
+            const status = statusFor(format);
+            return (
+              <button
+                key={format.key}
+                type="button"
+                role="menuitem"
+                className="download-option"
+                disabled={!status.ready || Boolean(busyFormat)}
+                onClick={() => choose(format.key)}
+              >
+                <span className={`format-glyph format-${format.key}`} aria-hidden="true" />
+                <span className="download-option-text">
+                  <strong>{busyFormat === format.key ? "Getting link..." : format.label}</strong>
+                  <small className={!status.ready && pending ? "is-pending" : ""}>{status.text}</small>
+                </span>
+              </button>
+            );
+          })}
+          {started && (
+            <p className="download-started">Download started. Check your browser's downloads for {started}.</p>
+          )}
+          {error && <p className="download-error">{error}</p>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AttemptCard({
+  attempt,
+  clientName: clientNameProp,
+  onViewAnalysis,
+  onArchive,
+  onRestore,
+  onDelete,
+  onUpdateNotes,
+  isAdmin = false,
+}) {
+  const [notesText, setNotesText] = useState(attempt.instructor_notes || "");
+  const [savingNotes, setSavingNotes] = useState(false);
+  const [showNotesBox, setShowNotesBox] = useState(false);
+
+  useEffect(() => {
+    setNotesText(attempt.instructor_notes || "");
+  }, [attempt.instructor_notes]);
+
+  const handleSaveNotes = async () => {
+    setSavingNotes(true);
+    try {
+      if (onUpdateNotes) {
+        await onUpdateNotes(attempt.id, notesText);
+      } else {
+        const token = getToken("admin");
+        const updated = await api(`/admin/attempts/${attempt.id}/notes`, {
+          method: "PATCH",
+          token,
+          body: { notes: notesText },
+        });
+        attempt.instructor_notes = notesText;
+        attempt.notes_source = updated?.notes_source ?? null;
+        if (updated && updated.report_path) {
+          attempt.report_path = updated.report_path;
+        }
+      }
+      setShowNotesBox(false);
+    } catch (err) {
+      alert(err.message || "Failed to save note");
+    } finally {
+      setSavingNotes(false);
+    }
+  };
+
+  const handleClearNotes = async () => {
+    setNotesText("");
+    setSavingNotes(true);
+    try {
+      if (onUpdateNotes) {
+        await onUpdateNotes(attempt.id, "");
+      } else {
+        const token = getToken("admin");
+        const updated = await api(`/admin/attempts/${attempt.id}/notes`, {
+          method: "PATCH",
+          token,
+          body: { notes: "" },
+        });
+        attempt.instructor_notes = "";
+        attempt.notes_source = null;
+        if (updated && updated.report_path) {
+          attempt.report_path = updated.report_path;
+        }
+      }
+      setShowNotesBox(false);
+    } catch (err) {
+      alert(err.message || "Failed to clear note");
+    } finally {
+      setSavingNotes(false);
+    }
+  };
+
   const blueIq = Math.ceil(
     Number(attempt.blue_iq_score || (Number(attempt.pressure_score || 0) + Number(attempt.balance_score || 0) + Number(attempt.rotation_score || 0) + Number(attempt.edging_score || 0)) / 4)
   );
+  const [, tierKey] = scoreBand(blueIq);
   const video = fileUrl(attempt.video_link || attempt.output_video_path);
-  const report = fileUrl(attempt.report_path);
+  const rawReportUrl = fileUrl(attempt.report_path);
+  const report = rawReportUrl
+    ? `${rawReportUrl}${rawReportUrl.includes("?") ? "&" : "?"}t=${new Date(attempt.updated_at || Date.now()).getTime()}`
+    : null;
   const comparisons = attempt.personal_best_comparisons || {};
   const newPersonalBests = new Set(attempt.new_personal_bests || []);
   const runNumber = attempt.run_number || attempt.attempt_number || attempt.id;
   const sessionLabel = attempt.session_number ? `Session ${attempt.session_number}` : "Session";
   const dateLabel = formatDate(attempt.session_date || attempt.created_at || attempt.timestamp);
   const clientName = clientNameProp || attempt.client_name || attempt.person_name || attempt.user_name || attempt.person?.name;
+  const initials = getInitials(clientName);
+  const blueIqComparison = formatComparisonStatus(comparisons.blue_iq, newPersonalBests.has("blue_iq"));
+  const blueIqPercent = Math.min(100, Math.max(0, Math.round((blueIq / 240) * 100)));
+
   return (
     <article className={`attempt-card ${attempt.is_archived ? "is-archived" : ""}`}>
-      <div className="attempt-top">
-        <div>
-          {clientName && (
-            <div className="attempt-client-tag">
-              <span className="attempt-client-icon">👤</span>
-              <strong className="attempt-client-name">{clientName}</strong>
-            </div>
-          )}
-          <p className="eyebrow">{sessionLabel} / Run {runNumber}</p>
-          <h3>Blue IQ {blueIq}<span>/240</span></h3>
-          <p className="attempt-date">{dateLabel}</p>
+      {/* (a) Card Header */}
+      <div className="attempt-card-header">
+        <div className="attempt-card-identity">
+          <div className="athlete-avatar-circle" title={clientName || "Athlete"}>
+            {initials || (
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
+                <circle cx="12" cy="7" r="4" />
+              </svg>
+            )}
+          </div>
+          <div className="attempt-athlete-meta">
+            <strong className="attempt-athlete-name">{clientName || "Athlete"}</strong>
+            <span className="attempt-session-tag">
+              {sessionLabel} · Run {runNumber}
+              {dateLabel && dateLabel !== "Date unavailable" ? ` · ${dateLabel}` : ""}
+            </span>
+          </div>
         </div>
-        <div className="attempt-badges">
-          {attempt.is_archived && <span className="filter-chip" style={{ color: '#f59e0b', borderColor: '#f59e0b', background: 'rgba(245,158,11,0.1)' }}>Archived</span>}
-          {newPersonalBests.has("blue_iq") && <span className="new-pb-badge">New personal best</span>}
+        <div className="attempt-header-badges">
+          {attempt.is_archived && <span className="attempt-archived-pill">Archived</span>}
           <ScorePill score={blueIq} />
         </div>
       </div>
-      {comparisons.blue_iq && <p className="blue-iq-comparison">{comparisonLabel(comparisons.blue_iq)}</p>}
-      <div className="metric-grid">
-        {SCORE_METRICS.slice(1).map(([key, label]) => (
-          <div className="metric-row" key={key}>
-            <div>
-              <span>{label}</span>
-              <small className={newPersonalBests.has(key) ? "new-record-copy" : ""}>
-                {newPersonalBests.has(key) ? "New personal best" : comparisonLabel(comparisons[key])}
-              </small>
-            </div>
-            <b>{Math.ceil(attempt[`${key}_score`] || 0)}<small>/240</small></b>
+
+      {/* (b) Inset Score Panel (Blue IQ) */}
+      <div className="score-inset-panel">
+        <div className="score-inset-top">
+          <span className="score-inset-label">BLUE IQ SCORE</span>
+          <div className="score-inset-value">
+            <strong>{blueIq}</strong>
+            <small>/240</small>
           </div>
-        ))}
+        </div>
+        <div className="score-bar-track">
+          <div
+            className={`score-bar-fill ${tierKey}`}
+            style={{ width: `${blueIqPercent}%` }}
+          />
+        </div>
+        <div className="score-inset-sub">
+          <span className={`status-dot status-${blueIqComparison.status}`} />
+          <span className="score-status-text">{blueIqComparison.text}</span>
+        </div>
       </div>
-      <div className="card-actions">
-        {onViewAnalysis && (
-          <button type="button" onClick={() => onViewAnalysis(attempt)}>View graph</button>
-        )}
-        {video && <a href={video} target="_blank" rel="noreferrer">View video</a>}
-        {report && <a href={report} target="_blank" rel="noreferrer">View report</a>}
-        {onRestore && attempt.is_archived && (
-          <button type="button" className="action-restore" onClick={() => onRestore(attempt)}>
-            Restore
-          </button>
-        )}
-        {onArchive && !attempt.is_archived && (
-          <button type="button" className="action-archive" onClick={() => onArchive(attempt)}>
-            Archive
-          </button>
-        )}
-        {onDelete && (
-          <button type="button" className="action-delete" onClick={() => onDelete(attempt)}>
-            Delete
-          </button>
-        )}
+
+      {/* (c) Four Metric Rows */}
+      <div className="metric-rows-list">
+        {SCORE_METRICS.slice(1).map(([key, label]) => {
+          const scoreVal = Math.ceil(attempt[`${key}_score`] || 0);
+          const comp = formatComparisonStatus(comparisons[key], newPersonalBests.has(key));
+          const pct = Math.min(100, Math.max(0, Math.round((scoreVal / 240) * 100)));
+          return (
+            <div className="metric-item-row" key={key}>
+              <div className="metric-row-header">
+                <div className="metric-row-info">
+                  <span className="metric-row-name">{label}</span>
+                  <small className={`metric-row-sub ${comp.status === "pb" ? "is-new-pb" : ""}`}>
+                    {comp.text}
+                  </small>
+                </div>
+                <div className="metric-row-val">
+                  <strong>{scoreVal}</strong>
+                  <small>/240</small>
+                </div>
+              </div>
+              <div className="metric-bar-track">
+                <div className="metric-bar-fill" style={{ width: `${pct}%` }} />
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* (e) Coach's note: read view for everyone, inline editor for admins */}
+      {showNotesBox && isAdmin ? (
+        <div className="coach-note-editor">
+          <div className="coach-note-head">
+            <span className="coach-note-icon" aria-hidden="true">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M12 20h9" />
+                <path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z" />
+              </svg>
+            </span>
+            <div className="coach-note-heading">
+              <strong>Coach's note</strong>
+              <small>Shown on the client's card and PDF report</small>
+            </div>
+            {attempt.notes_source && NOTE_SOURCE_LABELS[attempt.notes_source] && (
+              <span className={`notes-source-tag source-${attempt.notes_source}`}>{NOTE_SOURCE_LABELS[attempt.notes_source]}</span>
+            )}
+            <button
+              type="button"
+              className="coach-note-close"
+              aria-label="Close note"
+              title="Close"
+              disabled={savingNotes}
+              onClick={() => {
+                setNotesText(attempt.instructor_notes || "");
+                setShowNotesBox(false);
+              }}
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" aria-hidden="true">
+                <line x1="18" y1="6" x2="6" y2="18" />
+                <line x1="6" y1="6" x2="18" y2="18" />
+              </svg>
+            </button>
+          </div>
+          <textarea
+            className="coach-note-textarea"
+            placeholder="Write a short, encouraging note for this run..."
+            value={notesText}
+            onChange={(e) => setNotesText(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Escape") {
+                setNotesText(attempt.instructor_notes || "");
+                setShowNotesBox(false);
+              }
+              if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && notesText !== (attempt.instructor_notes || "")) {
+                handleSaveNotes();
+              }
+            }}
+            rows={4}
+            maxLength={NOTE_MAX_CHARS}
+            autoFocus
+            disabled={savingNotes}
+          />
+          <div className="coach-note-meter">
+            <span>Saving updates the PDF report. Your edit replaces the automatic note.</span>
+            <span className={`coach-note-count ${notesText.length >= NOTE_MAX_CHARS ? "at-limit" : ""}`}>
+              {notesText.length}/{NOTE_MAX_CHARS}
+            </span>
+          </div>
+          <div className="coach-note-progress" aria-hidden="true">
+            <div style={{ width: `${Math.min(100, (notesText.length / NOTE_MAX_CHARS) * 100)}%` }} />
+          </div>
+          <div className="coach-note-actions">
+            {attempt.instructor_notes && (
+              <button type="button" className="coach-note-remove" disabled={savingNotes} onClick={handleClearNotes}>
+                Remove note
+              </button>
+            )}
+            <span className="coach-note-actions-spacer" />
+            <button
+              type="button"
+              className="coach-note-cancel"
+              disabled={savingNotes}
+              onClick={() => {
+                setNotesText(attempt.instructor_notes || "");
+                setShowNotesBox(false);
+              }}
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="coach-note-save"
+              disabled={savingNotes || !notesText.trim() || notesText === (attempt.instructor_notes || "")}
+              onClick={handleSaveNotes}
+            >
+              {savingNotes ? (
+                <>
+                  <span className="coach-note-spinner" aria-hidden="true" />
+                  Updating PDF...
+                </>
+              ) : (
+                "Save"
+              )}
+            </button>
+          </div>
+        </div>
+      ) : !isAdmin && attempt.instructor_notes ? (
+        <div className="coach-note-readonly">
+          <div className="coach-note-readonly-head">
+            <span className="coach-note-label">Coach's note</span>
+          </div>
+          <p>{attempt.instructor_notes}</p>
+        </div>
+      ) : null}
+
+      {/* (d) Card Actions (Pinned 2x2 grid + footer row) */}
+      <div className="card-actions-wrapper">
+        <div className="card-actions-2x2">
+          {report ? (
+            <a href={report} target="_blank" rel="noreferrer" className="btn-action-2x2" title="View PDF report">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                <polyline points="14 2 14 8 20 8" />
+                <line x1="16" y1="13" x2="8" y2="13" />
+                <line x1="16" y1="17" x2="8" y2="17" />
+              </svg>
+              <span>Report</span>
+            </a>
+          ) : (
+            <span className="btn-action-2x2 is-disabled" title="No report available">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                <polyline points="14 2 14 8 20 8" />
+              </svg>
+              <span>Report</span>
+            </span>
+          )}
+
+          {video ? (
+            <a href={video} target="_blank" rel="noreferrer" className="btn-action-2x2" title="View video with overlay">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor">
+                <polygon points="5 3 19 12 5 21 5 3" />
+              </svg>
+              <span>Video</span>
+            </a>
+          ) : (
+            <span className="btn-action-2x2 is-disabled" title="No video available">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor">
+                <polygon points="5 3 19 12 5 21 5 3" />
+              </svg>
+              <span>Video</span>
+            </span>
+          )}
+
+          {onViewAnalysis ? (
+            <button
+              type="button"
+              className="btn-action-2x2"
+              onClick={() => onViewAnalysis(attempt)}
+              title="View run analysis graph"
+            >
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <line x1="18" y1="20" x2="18" y2="10" />
+                <line x1="12" y1="20" x2="12" y2="4" />
+                <line x1="6" y1="20" x2="6" y2="14" />
+              </svg>
+              <span>Graph</span>
+            </button>
+          ) : (
+            <span className="btn-action-2x2 is-disabled">
+              <span>Graph</span>
+            </span>
+          )}
+
+          {video ? (
+            <DownloadMenu attempt={attempt} tokenKind={isAdmin ? "admin" : "client"} />
+          ) : (
+            <span className="btn-action-2x2 is-disabled" title="No download available">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                <polyline points="7 10 12 15 17 10" />
+                <line x1="12" y1="15" x2="12" y2="3" />
+              </svg>
+              <span>Download</span>
+            </span>
+          )}
+        </div>
+
+        <div className="card-actions-footer">
+          {isAdmin ? (
+            <button
+              type="button"
+              className="btn-footer-ghost action-notes-toggle"
+              onClick={() => {
+                if (showNotesBox) setNotesText(attempt.instructor_notes || "");
+                setShowNotesBox((prev) => !prev);
+              }}
+            >
+              {showNotesBox ? "Hide note" : attempt.instructor_notes ? "Edit note" : "Add note"}
+            </button>
+          ) : (
+            <span />
+          )}
+
+          <div className="card-footer-right">
+            {onRestore && attempt.is_archived && (
+              <button
+                type="button"
+                className="btn-footer-ghost action-restore"
+                onClick={() => onRestore(attempt)}
+              >
+                Restore
+              </button>
+            )}
+            {onArchive && !attempt.is_archived && (
+              <button
+                type="button"
+                className="btn-footer-ghost action-archive"
+                onClick={() => onArchive(attempt)}
+              >
+                Archive
+              </button>
+            )}
+            {onDelete && (
+              <button
+                type="button"
+                className="btn-footer-ghost btn-danger-ghost action-delete"
+                onClick={() => onDelete(attempt)}
+              >
+                Delete
+              </button>
+            )}
+          </div>
+        </div>
       </div>
     </article>
   );
@@ -560,6 +1391,12 @@ function UploadAnalysisPanel({ token, clients = [], fixedUser = null, onComplete
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [queuedJobInfo, setQueuedJobInfo] = useState(null);
 
+  // File drop & selection state
+  const [selectedFileName, setSelectedFileName] = useState("");
+  const [selectedFileSize, setSelectedFileSize] = useState("");
+  const [isDragging, setIsDragging] = useState(false);
+  const fileInputRef = useRef(null);
+
   // Video preview & orientation state
   const [previewUrl, setPreviewUrl] = useState("");
   const [videoRotation, setVideoRotation] = useState(""); // "" (auto), "-90", "90", "180", "0"
@@ -568,12 +1405,17 @@ function UploadAnalysisPanel({ token, clients = [], fixedUser = null, onComplete
   function handleLocalFileSelect(e) {
     const file = e.target.files?.[0];
     if (!file) {
+      setSelectedFileName("");
+      setSelectedFileSize("");
       if (previewUrl) URL.revokeObjectURL(previewUrl);
       setPreviewUrl("");
       setVideoRotation("");
       setIsPortraitDetected(false);
       return;
     }
+    setSelectedFileName(file.name);
+    const mb = (file.size / (1024 * 1024)).toFixed(1);
+    setSelectedFileSize(`${mb} MB`);
     const url = URL.createObjectURL(file);
     if (previewUrl) URL.revokeObjectURL(previewUrl);
     setPreviewUrl(url);
@@ -774,8 +1616,9 @@ function UploadAnalysisPanel({ token, clients = [], fixedUser = null, onComplete
     return new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest();
       xhr.open("POST", url);
-      if (token) {
-        xhr.setRequestHeader("Authorization", `Bearer ${token}`);
+      const currentToken = resolveToken(token);
+      if (currentToken) {
+        xhr.setRequestHeader("Authorization", `Bearer ${currentToken}`);
       }
 
       xhr.upload.onprogress = (event) => {
@@ -832,6 +1675,10 @@ function UploadAnalysisPanel({ token, clients = [], fixedUser = null, onComplete
 
       let response;
       if (uploadSource === "local") {
+        const file = formElement.querySelector('[name="file"]')?.files?.[0];
+        if (!file) {
+          throw new Error("Please choose or drop a video file before uploading.");
+        }
         const formData = new FormData(formElement);
         formData.set("user_id", targetUserId);
         if (!videoRotation) {
@@ -873,6 +1720,9 @@ function UploadAnalysisPanel({ token, clients = [], fixedUser = null, onComplete
       setPreviewUrl("");
       setVideoRotation("");
       setIsPortraitDetected(false);
+      setSelectedFileName("");
+      setSelectedFileSize("");
+      if (fileInputRef.current) fileInputRef.current.value = "";
       setDriveFile(null);
       setDriveLinkInput("");
       setSelectedClient(null);
@@ -902,8 +1752,11 @@ function UploadAnalysisPanel({ token, clients = [], fixedUser = null, onComplete
 
   return (
     <form className="upload-panel" onSubmit={submitUpload}>
-      <p className="eyebrow">New analysis</p>
-      <h2>{fixedUser ? `Upload a run for ${fixedUser.name}` : "Upload client video"}</h2>
+      <div className="upload-form-header">
+        <p className="eyebrow upload-form-eyebrow">NEW ANALYSIS</p>
+        <h2 className="upload-form-title">{fixedUser ? `Upload a run for ${fixedUser.name}` : "Upload client video"}</h2>
+        <p className="upload-form-subtitle">Assign a run to an athlete, configure overlays, and queue for processing.</p>
+      </div>
 
       <div className="upload-source-toggle">
         <button
@@ -912,7 +1765,12 @@ function UploadAnalysisPanel({ token, clients = [], fixedUser = null, onComplete
           onClick={() => setUploadSource("local")}
           disabled={isSubmitting}
         >
-          📁 Local Computer
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <rect x="2" y="3" width="20" height="14" rx="2" ry="2" />
+            <line x1="8" y1="21" x2="16" y2="21" />
+            <line x1="12" y1="17" x2="12" y2="21" />
+          </svg>
+          <span>Local Computer</span>
         </button>
         <button
           type="button"
@@ -920,7 +1778,10 @@ function UploadAnalysisPanel({ token, clients = [], fixedUser = null, onComplete
           onClick={() => setUploadSource("drive")}
           disabled={isSubmitting}
         >
-          ☁️ Google Drive
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z" />
+          </svg>
+          <span>Google Drive</span>
         </button>
       </div>
 
@@ -934,11 +1795,13 @@ function UploadAnalysisPanel({ token, clients = [], fixedUser = null, onComplete
         </>
       ) : (
         <div className="client-select-field">
-          <label>Assign to client</label>
+          <label className="field-label">ASSIGN TO CLIENT</label>
           {selectedClient ? (
             <div className="selected-client-card">
               <div className="selected-client-info">
-                <span className="selected-client-avatar">👤</span>
+                <div className="selected-client-avatar">
+                  {getInitials(selectedClient.name) || "👤"}
+                </div>
                 <div className="selected-client-details">
                   <span className="selected-client-name">{selectedClient.name}</span>
                   <small className="selected-client-email">{selectedClient.email}</small>
@@ -962,7 +1825,12 @@ function UploadAnalysisPanel({ token, clients = [], fixedUser = null, onComplete
           ) : (
             <div className="client-search-wrapper" ref={clientDropdownRef}>
               <div className="client-search-input-box">
-                <span className="client-search-icon">🔍</span>
+                <span className="client-search-icon">
+                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <circle cx="11" cy="11" r="8" />
+                    <line x1="21" y1="21" x2="16.65" y2="16.65" />
+                  </svg>
+                </span>
                 <input
                   ref={clientInputRef}
                   type="text"
@@ -1025,27 +1893,94 @@ function UploadAnalysisPanel({ token, clients = [], fixedUser = null, onComplete
           )}
         </div>
       )}
-      <label>Display mode</label>
-      <select name="display_mode" defaultValue="coach" disabled={isSubmitting}>
-        <option value="coach">Coach</option>
-        <option value="athlete">Athlete</option>
-      </select>
-      <label className="checkbox-row">
-        <input type="checkbox" name="report" value="true" defaultChecked disabled={isSubmitting} />
-        Generate PDF report
-      </label>
+
+      <div className="form-options-row">
+        <div className="form-option-col">
+          <label className="field-label" htmlFor="display-mode-select">DISPLAY MODE</label>
+          <div className="custom-select-wrapper">
+            <select
+              id="display-mode-select"
+              name="display_mode"
+              defaultValue="coach"
+              disabled={isSubmitting}
+              className="form-control-select"
+            >
+              <option value="coach">Coach</option>
+              <option value="athlete">Athlete</option>
+            </select>
+            <span className="select-chevron">▾</span>
+          </div>
+        </div>
+        <div className="form-option-col">
+          <label className="field-label">REPORT</label>
+          <label className="boxed-checkbox-label">
+            <input
+              type="checkbox"
+              name="report"
+              value="true"
+              defaultChecked
+              disabled={isSubmitting}
+              className="boxed-checkbox-native"
+            />
+            <span className="boxed-checkbox-box">
+              <svg width="12" height="10" viewBox="0 0 12 10" fill="none">
+                <path d="M1 5L4.5 8.5L11 1.5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            </span>
+            <span className="boxed-checkbox-text">Generate PDF report</span>
+          </label>
+        </div>
+      </div>
 
       {uploadSource === "local" ? (
-        <>
-          <label>Video file</label>
-          <input
-            type="file"
-            name="file"
-            accept="video/*"
-            required
-            disabled={isSubmitting}
-            onChange={handleLocalFileSelect}
-          />
+        <div className="upload-file-section">
+          <label className="field-label">VIDEO FILE</label>
+          <div
+            className={`upload-dropzone ${isDragging ? "is-dragover" : ""} ${selectedFileName ? "has-file" : ""}`}
+            onClick={() => fileInputRef.current?.click()}
+            onDragOver={(e) => {
+              e.preventDefault();
+              setIsDragging(true);
+            }}
+            onDragLeave={() => setIsDragging(false)}
+            onDrop={(e) => {
+              e.preventDefault();
+              setIsDragging(false);
+              if (e.dataTransfer.files?.length && fileInputRef.current) {
+                fileInputRef.current.files = e.dataTransfer.files;
+                handleLocalFileSelect({ target: fileInputRef.current });
+              }
+            }}
+          >
+            <input
+              ref={fileInputRef}
+              type="file"
+              name="file"
+              accept="video/*"
+              disabled={isSubmitting}
+              onChange={handleLocalFileSelect}
+              className="visually-hidden-file-input"
+            />
+            <div className="dropzone-icon">
+              <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                <polyline points="17 8 12 3 7 8" />
+                <line x1="12" y1="3" x2="12" y2="15" />
+              </svg>
+            </div>
+            {selectedFileName ? (
+              <div className="dropzone-selected-info">
+                <p className="dropzone-filename">{selectedFileName}</p>
+                <p className="dropzone-filesize">{selectedFileSize} · Click or drop another to replace</p>
+              </div>
+            ) : (
+              <div className="dropzone-prompt">
+                <p className="dropzone-prompt-text">Choose a video file or drag and drop here</p>
+                <p className="dropzone-prompt-sub">MP4, MOV up to 500MB</p>
+              </div>
+            )}
+          </div>
+
           {previewUrl && (
             <div className="video-upload-preview-card">
               <div className="video-preview-header">
@@ -1090,10 +2025,10 @@ function UploadAnalysisPanel({ token, clients = [], fixedUser = null, onComplete
               </div>
             </div>
           )}
-        </>
+        </div>
       ) : (
         <div className="drive-picker-container">
-          <label>Google Drive Video</label>
+          <label className="field-label">GOOGLE DRIVE VIDEO</label>
           {driveFile ? (
             <div className="selected-drive-card">
               <div className="selected-drive-icon">☁️</div>
@@ -1150,7 +2085,7 @@ function UploadAnalysisPanel({ token, clients = [], fixedUser = null, onComplete
         </div>
       )}
 
-      <button className="primary-button" disabled={isSubmitting}>
+      <button type="submit" className="primary-button upload-submit-btn" disabled={isSubmitting}>
         {isSubmitting
           ? uploadSource === "local"
             ? `Uploading (${uploadProgress}%)...`
@@ -1482,6 +2417,7 @@ function ClientDashboard() {
     <main className="app-shell">
       <AppHeader
         role="Client portal"
+        tokenKind="client"
         title={`Welcome${user ? `, ${user.name}` : ""}`}
         subtitle="Review the videos and reports your Bluerun instructor has uploaded for you."
         onLogout={() => {
@@ -1534,12 +2470,359 @@ function ClientDashboard() {
   );
 }
 
+function ClientSearchBox({ clients, query, onQueryChange, selected, onSelect, onClear }) {
+  const [open, setOpen] = useState(false);
+  const [highlight, setHighlight] = useState(0);
+  const boxRef = useRef(null);
+  const inputRef = useRef(null);
+  const suggestions = useMemo(() => rankClients(clients, query, 6), [clients, query]);
+
+  useEffect(() => {
+    setHighlight(0);
+  }, [query]);
+
+  useEffect(() => {
+    if (!open) return undefined;
+    const onDown = (event) => {
+      if (boxRef.current && !boxRef.current.contains(event.target)) setOpen(false);
+    };
+    document.addEventListener("mousedown", onDown);
+    return () => document.removeEventListener("mousedown", onDown);
+  }, [open]);
+
+  function choose(client) {
+    onSelect(client);
+    setOpen(false);
+  }
+
+  function onKeyDown(event) {
+    if (event.key === "ArrowDown" && suggestions.length) {
+      event.preventDefault();
+      setOpen(true);
+      setHighlight((h) => (h + 1) % suggestions.length);
+    } else if (event.key === "ArrowUp" && suggestions.length) {
+      event.preventDefault();
+      setHighlight((h) => (h - 1 + suggestions.length) % suggestions.length);
+    } else if (event.key === "Enter" && open && suggestions[highlight]) {
+      event.preventDefault();
+      choose(suggestions[highlight]);
+    } else if (event.key === "Escape") {
+      setOpen(false);
+    } else if (event.key === "Backspace" && !query && selected) {
+      onClear();
+    }
+  }
+
+  const showList = open && !selected && query.trim() !== "";
+
+  return (
+    <div className="runs-filter-search client-combobox" ref={boxRef}>
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+        <circle cx="11" cy="11" r="8" />
+        <line x1="21" y1="21" x2="16.65" y2="16.65" />
+      </svg>
+      {selected ? (
+        <div className="client-search-chip-row" onClick={() => inputRef.current?.focus()}>
+          <span className="client-search-chip">
+            <span className="client-search-chip-avatar">{getInitials(selected.name)}</span>
+            <span className="client-search-chip-name">{selected.name}</span>
+            <button type="button" onClick={onClear} aria-label={`Remove ${selected.name}`} title="Show all athletes">✕</button>
+          </span>
+          <input ref={inputRef} className="client-search-ghost-input" onKeyDown={onKeyDown} aria-label="Search athletes" readOnly />
+        </div>
+      ) : (
+        <input
+          ref={inputRef}
+          type="text"
+          placeholder="Search athlete name or email..."
+          value={query}
+          onChange={(e) => {
+            onQueryChange(e.target.value);
+            setOpen(true);
+          }}
+          onFocus={() => setOpen(true)}
+          onKeyDown={onKeyDown}
+          className="runs-search-input"
+          role="combobox"
+          aria-expanded={showList}
+          aria-autocomplete="list"
+          aria-controls="client-search-list"
+        />
+      )}
+      {!selected && query && (
+        <button type="button" className="runs-search-clear-btn" onClick={() => onQueryChange("")} title="Clear search">
+          ✕
+        </button>
+      )}
+      {showList && (
+        <div className="client-search-list" id="client-search-list" role="listbox">
+          {suggestions.length ? (
+            <>
+              <p className="client-search-list-title">Athletes</p>
+              {suggestions.map((client, index) => (
+                <button
+                  key={client.id}
+                  type="button"
+                  role="option"
+                  aria-selected={index === highlight}
+                  className={`client-search-option ${index === highlight ? "is-active" : ""}`}
+                  onMouseEnter={() => setHighlight(index)}
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={() => choose(client)}
+                >
+                  <span className="client-search-avatar">{getInitials(client.name)}</span>
+                  <span className="client-search-option-text">
+                    <strong>{client.name}</strong>
+                    {client.email && <small>{client.email}</small>}
+                  </span>
+                  {index === highlight && <kbd>Enter</kbd>}
+                </button>
+              ))}
+            </>
+          ) : (
+            <p className="client-search-none">No athlete matches “{query.trim()}”</p>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Calendar days are handled as local "YYYY-MM-DD" keys; "" means all dates.
+function dayKey(date) {
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, "0");
+  const d = String(date.getDate()).padStart(2, "0");
+  return `${y}-${m}-${d}`;
+}
+
+function parseDayKey(key) {
+  const [y, m, d] = key.split("-").map(Number);
+  return new Date(y, m - 1, d);
+}
+
+function todayKey() {
+  return dayKey(new Date());
+}
+
+function shiftDayKey(key, days) {
+  const date = parseDayKey(key);
+  date.setDate(date.getDate() + days);
+  return dayKey(date);
+}
+
+function dayRangeIso(key) {
+  const start = parseDayKey(key);
+  const end = new Date(start);
+  end.setDate(end.getDate() + 1);
+  return [start.toISOString(), end.toISOString()];
+}
+
+function attemptDayKey(attempt) {
+  const raw = attempt.created_at || attempt.timestamp || attempt.session_date;
+  if (!raw) return "";
+  // created_at is UTC without a zone marker; read it as UTC so the local day is right.
+  const text = String(raw);
+  if (/^\d{4}-\d{2}-\d{2}$/.test(text)) return text;
+  const parsed = new Date(/[zZ]|[+-]\d\d:?\d\d$/.test(text) ? text : `${text}Z`);
+  return Number.isNaN(parsed.getTime()) ? "" : dayKey(parsed);
+}
+
+// "today", "yesterday" or "on Mon, Oct 6" for use inside a sentence.
+function dayPhrase(key) {
+  const label = dayLabel(key);
+  return label === "Today" || label === "Yesterday" ? label.toLowerCase() : `on ${label}`;
+}
+
+function dayLabel(key) {
+  if (!key) return "All dates";
+  const today = todayKey();
+  if (key === today) return "Today";
+  if (key === shiftDayKey(today, -1)) return "Yesterday";
+  const date = parseDayKey(key);
+  const sameYear = date.getFullYear() === new Date().getFullYear();
+  return date.toLocaleDateString(undefined, {
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+    ...(sameYear ? {} : { year: "numeric" }),
+  });
+}
+
+const WEEKDAY_LABELS = ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"];
+
+function DateNavigator({ value, onChange, allowAll = true }) {
+  const today = todayKey();
+  const [open, setOpen] = useState(false);
+  const [viewMonth, setViewMonth] = useState(() => {
+    const base = parseDayKey(value || today);
+    return new Date(base.getFullYear(), base.getMonth(), 1);
+  });
+  const ref = useRef(null);
+
+  useEffect(() => {
+    if (!open) return undefined;
+    const base = parseDayKey(value || today);
+    setViewMonth(new Date(base.getFullYear(), base.getMonth(), 1));
+    const onDown = (event) => {
+      if (ref.current && !ref.current.contains(event.target)) setOpen(false);
+    };
+    const onKey = (event) => event.key === "Escape" && setOpen(false);
+    document.addEventListener("mousedown", onDown);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
+  const atToday = value === today;
+  const goPrev = () => onChange(shiftDayKey(value || today, value ? -1 : 0));
+  const goNext = () => {
+    if (value && !atToday) onChange(shiftDayKey(value, 1));
+  };
+
+  const thisMonth = new Date(parseDayKey(today).getFullYear(), parseDayKey(today).getMonth(), 1);
+  const canNextMonth = viewMonth < thisMonth;
+  const leading = (viewMonth.getDay() + 6) % 7; // Monday-first grid
+  const daysInMonth = new Date(viewMonth.getFullYear(), viewMonth.getMonth() + 1, 0).getDate();
+  const cells = [
+    ...Array.from({ length: leading }, () => null),
+    ...Array.from({ length: daysInMonth }, (_, i) => dayKey(new Date(viewMonth.getFullYear(), viewMonth.getMonth(), i + 1))),
+  ];
+
+  function pick(key) {
+    onChange(key);
+    setOpen(false);
+  }
+
+  return (
+    <div className="date-nav" ref={ref}>
+      <button type="button" className="date-nav-step" onClick={goPrev} aria-label="Previous day" title="Previous day">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <polyline points="15 18 9 12 15 6" />
+        </svg>
+      </button>
+      <button
+        type="button"
+        className={`date-nav-trigger ${open ? "is-open" : ""}`}
+        onClick={() => setOpen((v) => !v)}
+        aria-haspopup="dialog"
+        aria-expanded={open}
+      >
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <rect x="3" y="4" width="18" height="18" rx="2" />
+          <line x1="16" y1="2" x2="16" y2="6" />
+          <line x1="8" y1="2" x2="8" y2="6" />
+          <line x1="3" y1="10" x2="21" y2="10" />
+        </svg>
+        <span>{dayLabel(value)}</span>
+        <svg className="date-nav-caret" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <polyline points="6 9 12 15 18 9" />
+        </svg>
+      </button>
+      <button
+        type="button"
+        className="date-nav-step"
+        onClick={goNext}
+        disabled={!value || atToday}
+        aria-label="Next day"
+        title={atToday ? "You are on today" : "Next day"}
+      >
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <polyline points="9 18 15 12 9 6" />
+        </svg>
+      </button>
+
+      {open && (
+        <div className="date-nav-popover" role="dialog" aria-label="Choose a date">
+          <div className="calendar-head">
+            <button
+              type="button"
+              className="calendar-month-step"
+              onClick={() => setViewMonth(new Date(viewMonth.getFullYear(), viewMonth.getMonth() - 1, 1))}
+              aria-label="Previous month"
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <polyline points="15 18 9 12 15 6" />
+              </svg>
+            </button>
+            <strong>{viewMonth.toLocaleDateString(undefined, { month: "long", year: "numeric" })}</strong>
+            <button
+              type="button"
+              className="calendar-month-step"
+              onClick={() => setViewMonth(new Date(viewMonth.getFullYear(), viewMonth.getMonth() + 1, 1))}
+              disabled={!canNextMonth}
+              aria-label="Next month"
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <polyline points="9 18 15 12 9 6" />
+              </svg>
+            </button>
+          </div>
+          <div className="calendar-grid">
+            {WEEKDAY_LABELS.map((label) => (
+              <span key={label} className="calendar-weekday">{label}</span>
+            ))}
+            {cells.map((key, index) => key ? (
+              <button
+                key={key}
+                type="button"
+                className={`calendar-day ${key === value ? "is-selected" : ""} ${key === today ? "is-today" : ""}`}
+                disabled={key > today}
+                onClick={() => pick(key)}
+                aria-pressed={key === value}
+              >
+                {Number(key.slice(8))}
+              </button>
+            ) : (
+              <span key={`blank-${index}`} />
+            ))}
+          </div>
+          <div className="calendar-foot">
+            <button type="button" onClick={() => pick(today)}>Today</button>
+            {allowAll && (
+              <button type="button" className={!value ? "is-active" : ""} onClick={() => pick("")}>All dates</button>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function UploadVideoModal({ token, user, onCompleted, onClose }) {
+  useEffect(() => {
+    const onKey = (event) => event.key === "Escape" && onClose();
+    window.addEventListener("keydown", onKey);
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      document.body.style.overflow = previousOverflow;
+    };
+  }, [onClose]);
+
+  return (
+    <div className="modal-backdrop" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
+      <div className="upload-modal" role="dialog" aria-modal="true" aria-label={`Upload a video for ${user.name}`}>
+        <button type="button" className="modal-close upload-modal-close" onClick={onClose} aria-label="Close">×</button>
+        <UploadAnalysisPanel token={token} fixedUser={user} onCompleted={onCompleted} />
+        <p className="upload-modal-hint">You can close this window. Processing continues in the background and the run appears here when it is ready.</p>
+      </div>
+    </div>
+  );
+}
+
 function AdminAthleteProfile({ userId }) {
   const token = getToken("admin");
   const [user, setUser] = useState(null);
   const [attempts, setAttempts] = useState([]);
   const [personalBests, setPersonalBests] = useState({});
   const [displayCount, setDisplayCount] = useState(12);
+  const [selectedDay, setSelectedDay] = useState("");
+  const [showUpload, setShowUpload] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
   const [graphAttempt, setGraphAttempt] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -1585,6 +2868,15 @@ function AdminAthleteProfile({ userId }) {
     }
   }
 
+  async function handleUpdateNotes(attemptId, notes) {
+    await api(`/admin/attempts/${attemptId}/notes`, {
+      method: "PATCH",
+      token,
+      body: { notes },
+    });
+    await loadProfileActivity();
+  }
+
   useEffect(() => {
     if (!token) {
       routeTo("/admin-login");
@@ -1628,10 +2920,27 @@ function AdminAthleteProfile({ userId }) {
       + Number(latest.edging_score || 0)
     ) / 4))
     : null;
-  const displayedAttempts = completedAttempts.slice(0, displayCount);
-  const hasMore = displayCount < completedAttempts.length;
-  const latestVideo = latest ? fileUrl(latest.video_link || latest.output_video_path) : null;
-  const latestReport = latest ? fileUrl(latest.report_path) : null;
+  const filteredCompletedAttempts = useMemo(() => {
+    return completedAttempts.filter((attempt) => {
+      if (searchQuery.trim()) {
+        const q = searchQuery.toLowerCase().trim();
+        const text = `run ${attempt.run_number || attempt.id} ${attempt.video_name || ""} ${attempt.instructor_notes || ""}`.toLowerCase();
+        if (!text.includes(q)) return false;
+      }
+      if (selectedDay && attemptDayKey(attempt) !== selectedDay) return false;
+      return true;
+    });
+  }, [completedAttempts, searchQuery, selectedDay]);
+
+  const isProfileFilterActive = searchQuery.trim() !== "" || selectedDay !== "";
+  const clearProfileFilters = () => {
+    setSearchQuery("");
+    setSelectedDay("");
+    setDisplayCount(12);
+  };
+
+  const displayedAttempts = filteredCompletedAttempts.slice(0, displayCount);
+  const hasMore = displayCount < filteredCompletedAttempts.length;
 
   return (
     <main className="app-shell">
@@ -1641,7 +2950,7 @@ function AdminAthleteProfile({ userId }) {
       <AppHeader
         role="Admin / Athlete profile"
         title={user?.name || "Athlete profile"}
-        subtitle="Upload new runs and review this athlete's generated videos, reports, and score history."
+        subtitle="Review this athlete's personal bests, score history, videos and reports."
         onLogout={() => {
           clearToken("admin");
           routeTo("/admin-login");
@@ -1661,6 +2970,14 @@ function AdminAthleteProfile({ userId }) {
                 <p>{user.email}{user.phone ? ` / ${user.phone}` : ""}</p>
               </div>
             </div>
+            <button type="button" className="primary-button profile-upload-btn" onClick={() => setShowUpload(true)}>
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                <polyline points="17 8 12 3 7 8" />
+                <line x1="12" y1="3" x2="12" y2="15" />
+              </svg>
+              Upload a video
+            </button>
             <div className="selected-athlete-stats">
               <div>
                 <span>Completed runs</span>
@@ -1677,40 +2994,22 @@ function AdminAthleteProfile({ userId }) {
             </div>
           </section>
 
-          <section className="admin-layout profile-workspace">
-            <UploadAnalysisPanel token={token} fixedUser={user} onCompleted={loadProfileActivity} />
-            <section className="user-panel latest-run-panel">
-              <p className="eyebrow">Latest analysis</p>
-              {latest ? (
-                <>
-                  <div className="latest-run-heading">
-                    <div>
-                      <h2>Run {latest.run_number || latest.attempt_number || latest.id}</h2>
-                      <p>{formatDate(latest.session_date || latest.created_at)}</p>
-                    </div>
-                    <ScorePill score={latestBlueIq} />
-                  </div>
-                  <div className="latest-score-row">
-                    <span>Blue IQ</span>
-                    <strong>{latestBlueIq}<small>/240</small></strong>
-                  </div>
-                  <div className="card-actions">
-                    <button type="button" onClick={() => setGraphAttempt(latest)}>View graph</button>
-                    {latestVideo && <a href={latestVideo} target="_blank" rel="noreferrer">View video</a>}
-                    {latestReport && <a href={latestReport} target="_blank" rel="noreferrer">View report</a>}
-                  </div>
-                </>
-              ) : (
-                <p className="empty-copy">No completed analysis yet. Upload the athlete's first run to establish a baseline.</p>
-              )}
-            </section>
-          </section>
-
           <PersonalBestPanel
             records={personalBests}
             title={`${user.name}'s personal bests`}
             description="Highest completed Blue IQ and pillar results, with the session and run where each record was set."
           />
+
+          {completedAttempts.length >= 2 && (
+            <TrendsChart
+              api={api}
+              token={token}
+              endpoint={`/admin/users/${userId}/trends`}
+              audience="admin"
+              athleteName={user.name}
+              refreshKey={`${completedAttempts.length}-${latest?.id || ""}`}
+            />
+          )}
 
           <section className="section-block">
             <div className="section-heading">
@@ -1720,6 +3019,57 @@ function AdminAthleteProfile({ userId }) {
                 <p>Open any completed run, PDF report, or detailed score graph for this athlete.</p>
               </div>
             </div>
+
+            {completedAttempts.length > 0 && (
+              <div className="runs-filter-bar">
+                <div className="runs-filter-search">
+                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <circle cx="11" cy="11" r="8" />
+                    <line x1="21" y1="21" x2="16.65" y2="16.65" />
+                  </svg>
+                  <input
+                    type="text"
+                    placeholder="Search run #, notes, or video..."
+                    value={searchQuery}
+                    onChange={(e) => { setSearchQuery(e.target.value); setDisplayCount(12); }}
+                    className="runs-search-input"
+                  />
+                  {searchQuery && (
+                    <button
+                      type="button"
+                      className="runs-search-clear-btn"
+                      onClick={() => setSearchQuery("")}
+                      title="Clear search"
+                    >
+                      ✕
+                    </button>
+                  )}
+                </div>
+
+                <div className="runs-filter-controls">
+                  <DateNavigator value={selectedDay} onChange={(key) => { setSelectedDay(key); setDisplayCount(12); }} />
+
+                  {isProfileFilterActive && (
+                    <button type="button" className="btn-clear-filters" onClick={clearProfileFilters} title="Reset filters">
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                        <line x1="18" y1="6" x2="6" y2="18" />
+                        <line x1="6" y1="6" x2="18" y2="18" />
+                      </svg>
+                      Reset
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {completedAttempts.length > 0 && (
+              <div className="runs-filter-status-row">
+                <span className="runs-count-badge">
+                  Showing <strong>{displayedAttempts.length}</strong> of <strong>{filteredCompletedAttempts.length}</strong> runs
+                  {filteredCompletedAttempts.length !== completedAttempts.length && ` (filtered from ${completedAttempts.length} total)`}
+                </span>
+              </div>
+            )}
             <div className="cards-grid">
               {displayedAttempts.length ? displayedAttempts.map((attempt) => (
                 <AttemptCard
@@ -1730,8 +3080,22 @@ function AdminAthleteProfile({ userId }) {
                   onArchive={handleArchive}
                   onRestore={handleRestore}
                   onDelete={handleDelete}
+                  onUpdateNotes={handleUpdateNotes}
+                  isAdmin={true}
                 />
-              )) : <EmptyState text="No completed runs for this athlete yet." />}
+              )) : (
+                <FunEmptyState
+                  kind={
+                    !completedAttempts.length ? "athlete"
+                      : searchQuery.trim() ? "search"
+                        : selectedDay === todayKey() ? "today" : "day"
+                  }
+                  q={searchQuery.trim()}
+                  day={selectedDay}
+                  actionLabel={completedAttempts.length && isProfileFilterActive ? "Clear filters" : undefined}
+                  onAction={clearProfileFilters}
+                />
+              )}
             </div>
             {hasMore && (
               <div className="load-more-row">
@@ -1743,6 +3107,14 @@ function AdminAthleteProfile({ userId }) {
           </section>
         </>
       ) : null}
+      {showUpload && user && (
+        <UploadVideoModal
+          token={token}
+          user={user}
+          onCompleted={loadProfileActivity}
+          onClose={() => setShowUpload(false)}
+        />
+      )}
       {graphAttempt && (
         <RunAnalysisGraph
           api={api}
@@ -1767,7 +3139,46 @@ function AdminDashboard() {
   const [displayCount, setDisplayCount] = useState(12); // Show 12 initially to fill widescreen area
   const [showArchived, setShowArchived] = useState(false);
   const [clientSearch, setClientSearch] = useState("");
+  const [runSearchQuery, setRunSearchQuery] = useState("");
+  const [debouncedRunSearch, setDebouncedRunSearch] = useState("");
+  const [selectedRunClient, setSelectedRunClient] = useState(null);
+  const [selectedDay, setSelectedDay] = useState(todayKey);
+  // Set once the admin picks a date themselves; until then a search spans all dates.
+  const [dayChosen, setDayChosen] = useState(false);
   const [error, setError] = useState("");
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => setDebouncedRunSearch(runSearchQuery.trim()), 300);
+    return () => window.clearTimeout(timer);
+  }, [runSearchQuery]);
+
+  // The server filters by day and athlete name/email, so any past date works
+  // (not just the most recent runs already in the browser).
+  const searchActive = Boolean(selectedRunClient) || debouncedRunSearch !== "";
+  // Looking up an athlete should show their whole history, not just today.
+  const effectiveDay = searchActive && !dayChosen ? "" : selectedDay;
+
+  const attemptsUrl = useMemo(() => {
+    const params = new URLSearchParams({ limit: "100" });
+    if (showArchived) params.set("only_archived", "true");
+    if (effectiveDay) {
+      const [start, end] = dayRangeIso(effectiveDay);
+      params.set("start", start);
+      params.set("end", end);
+    }
+    if (selectedRunClient) {
+      params.set("person_ids", String(selectedRunClient.id));
+    } else if (debouncedRunSearch) {
+      // Fuzzy-match athletes in the browser (typos welcome), then fetch their runs.
+      const matches = rankClients(users.filter((user) => user.role !== "admin"), debouncedRunSearch, 200);
+      if (matches.length) params.set("person_ids", matches.map((client) => client.id).join(","));
+      else params.set("q", debouncedRunSearch);
+    }
+    return `/admin/attempts?${params.toString()}`;
+  }, [showArchived, effectiveDay, debouncedRunSearch, selectedRunClient, users]);
+  const attemptsUrlRef = useRef(attemptsUrl);
+  attemptsUrlRef.current = attemptsUrl;
+  const attemptsRequestRef = useRef(0);
   const [graphAttempt, setGraphAttempt] = useState(null);
 
   async function loadJobs() {
@@ -1779,37 +3190,31 @@ function AdminDashboard() {
     }
   }
 
-  async function loadData() {
-    setAttemptsLoading(true);
-    try {
-      const attemptsUrl = showArchived
-        ? "/admin/attempts?limit=100&only_archived=true"
-        : "/admin/attempts?limit=100";
-      const [userRows, attemptRows, leaderboardRows, jobRows] = await Promise.all([
-        api("/admin/users?limit=1000", { token }),
-        api(attemptsUrl, { token }),
-        api("/admin/leaderboards?limit=50", { token }),
-        api("/jobs/", { token }).catch(() => []),
-      ]);
-      setUsers(userRows);
-      setAttempts(attemptRows);
-      setLeaderboards(leaderboardRows.leaderboards || {});
-      setJobs(Array.isArray(jobRows) ? jobRows : []);
-    } finally {
-      setAttemptsLoading(false);
-    }
+  async function loadAttempts() {
+    const url = attemptsUrlRef.current;
+    const requestId = ++attemptsRequestRef.current;
+    const rows = await api(url, { token });
+    // Ignore answers for filters the admin has already moved away from.
+    if (requestId === attemptsRequestRef.current) setAttempts(rows);
   }
 
-  async function loadActivity() {
-    const attemptsUrl = showArchived
-      ? "/admin/attempts?limit=100&only_archived=true"
-      : "/admin/attempts?limit=100";
-    const [attemptRows, leaderboardRows, jobRows] = await Promise.all([
-      api(attemptsUrl, { token }),
+  async function loadData() {
+    const [userRows, leaderboardRows, jobRows] = await Promise.all([
+      api("/admin/users?limit=1000", { token }),
       api("/admin/leaderboards?limit=50", { token }),
       api("/jobs/", { token }).catch(() => []),
     ]);
-    setAttempts(attemptRows);
+    setUsers(userRows);
+    setLeaderboards(leaderboardRows.leaderboards || {});
+    setJobs(Array.isArray(jobRows) ? jobRows : []);
+  }
+
+  async function loadActivity() {
+    const [, leaderboardRows, jobRows] = await Promise.all([
+      loadAttempts(),
+      api("/admin/leaderboards?limit=50", { token }),
+      api("/jobs/", { token }).catch(() => []),
+    ]);
     setLeaderboards(leaderboardRows.leaderboards || {});
     setJobs(Array.isArray(jobRows) ? jobRows : []);
   }
@@ -1817,7 +3222,7 @@ function AdminDashboard() {
   async function handleArchive(attempt) {
     try {
       await api(`/admin/attempts/${attempt.id}/archive`, { method: "POST", token });
-      await loadActivity();
+      await Promise.all([loadActivity(), loadData()]);
     } catch (err) {
       alert(`Failed to archive attempt: ${err.message}`);
     }
@@ -1826,7 +3231,7 @@ function AdminDashboard() {
   async function handleRestore(attempt) {
     try {
       await api(`/admin/attempts/${attempt.id}/restore`, { method: "POST", token });
-      await loadActivity();
+      await Promise.all([loadActivity(), loadData()]);
     } catch (err) {
       alert(`Failed to restore attempt: ${err.message}`);
     }
@@ -1840,10 +3245,19 @@ function AdminDashboard() {
 
     try {
       await api(`/admin/attempts/${attempt.id}`, { method: "DELETE", token });
-      await loadActivity();
+      await Promise.all([loadActivity(), loadData()]);
     } catch (err) {
       alert(`Failed to delete attempt: ${err.message}`);
     }
+  }
+
+  async function handleUpdateNotes(attemptId, notes) {
+    await api(`/admin/attempts/${attemptId}/notes`, {
+      method: "PATCH",
+      token,
+      body: { notes },
+    });
+    await loadActivity();
   }
 
   useEffect(() => {
@@ -1852,9 +3266,26 @@ function AdminDashboard() {
       return;
     }
     loadData().catch((err) => setError(err.message));
-  }, [token, showArchived]);
+  }, [token]);
+
+  useEffect(() => {
+    if (!token) return;
+    setAttemptsLoading(true);
+    loadAttempts()
+      .catch((err) => setError(err.message))
+      .finally(() => setAttemptsLoading(false));
+  }, [token, attemptsUrl]);
 
   const activeJobsCount = jobs.filter((j) => j.status === "processing" || j.status === "pending").length;
+
+  // Athlete run counts come with the user list; refresh it when uploads finish.
+  const previousActiveJobs = useRef(activeJobsCount);
+  useEffect(() => {
+    if (token && previousActiveJobs.current > 0 && activeJobsCount < previousActiveJobs.current) {
+      loadData().catch(() => {});
+    }
+    previousActiveJobs.current = activeJobsCount;
+  }, [activeJobsCount, token]);
 
   useEffect(() => {
     if (!token) return;
@@ -1885,15 +3316,27 @@ function AdminDashboard() {
     }
     return ranked.map(({ client }) => client);
   }, [clients, clientSearch]);
-  const displayedAttempts = attempts.slice(0, displayCount);
-  const hasMore = displayCount < attempts.length;
+  const filteredAttempts = attempts;
+
+  const runSearchLabel = selectedRunClient ? selectedRunClient.name : debouncedRunSearch;
+  const isAnyFilterActive = runSearchQuery.trim() !== "" || Boolean(selectedRunClient) || selectedDay !== todayKey();
+  const clearFilters = () => {
+    setRunSearchQuery("");
+    setSelectedRunClient(null);
+    setDayChosen(false);
+    setSelectedDay(todayKey());
+    setDisplayCount(12);
+  };
+
+  const displayedAttempts = filteredAttempts.slice(0, displayCount);
+  const hasMore = displayCount < filteredAttempts.length;
 
   return (
     <main className="app-shell">
       <AppHeader
-        role="Admin portal"
-        title="Bluerun operations"
-        subtitle="Upload videos for clients, review generated reports, and monitor analysis history."
+        role="Admin dashboard"
+        title="BLUERUN PORTAL"
+        subtitle="Manage clients, process runs, and track performance across all athletes."
         onLogout={() => {
           clearToken("admin");
           routeTo("/admin-login");
@@ -1903,7 +3346,7 @@ function AdminDashboard() {
       <nav className="admin-view-tabs" aria-label="Admin workspace">
         <button
           type="button"
-          className={adminView === "upload" ? "active" : ""}
+          className={`tab-pill-btn ${adminView === "upload" ? "active" : ""}`}
           aria-current={adminView === "upload" ? "page" : undefined}
           onClick={() => setAdminView("upload")}
         >
@@ -1911,7 +3354,7 @@ function AdminDashboard() {
         </button>
         <button
           type="button"
-          className={adminView === "queue" ? "active" : ""}
+          className={`tab-pill-btn ${adminView === "queue" ? "active" : ""}`}
           aria-current={adminView === "queue" ? "page" : undefined}
           onClick={() => setAdminView("queue")}
         >
@@ -1922,7 +3365,7 @@ function AdminDashboard() {
         </button>
         <button
           type="button"
-          className={adminView === "leaderboards" ? "active" : ""}
+          className={`tab-pill-btn ${adminView === "leaderboards" ? "active" : ""}`}
           aria-current={adminView === "leaderboards" ? "page" : undefined}
           onClick={() => setAdminView("leaderboards")}
         >
@@ -1930,7 +3373,7 @@ function AdminDashboard() {
         </button>
         <button
           type="button"
-          className={adminView === "profiles" ? "active" : ""}
+          className={`tab-pill-btn ${adminView === "profiles" ? "active" : ""}`}
           aria-current={adminView === "profiles" ? "page" : undefined}
           onClick={() => setAdminView("profiles")}
         >
@@ -1953,30 +3396,67 @@ function AdminDashboard() {
             />
           </section>
 
-          <section className="section-block">
-            <div className="section-heading">
-              <div>
-                <p className="eyebrow">Analysis history</p>
-                <h2>{showArchived ? "Archived attempts" : "Recent attempts"}</h2>
-                <p>Open recently generated videos, reports, and run graphs across all clients.</p>
-                <div className="filter-toggle-row">
-                  <button
-                    type="button"
-                    className={`filter-chip ${!showArchived ? "active" : ""}`}
-                    onClick={() => { setShowArchived(false); setDisplayCount(12); }}
-                  >
-                    Active runs
-                  </button>
-                  <button
-                    type="button"
-                    className={`filter-chip ${showArchived ? "active" : ""}`}
-                    onClick={() => { setShowArchived(true); setDisplayCount(12); }}
-                  >
-                    Archived runs
-                  </button>
-                </div>
+          <section className="section-block recent-attempts-section">
+            <div className="section-heading recent-attempts-heading">
+              <div className="recent-attempts-title-group">
+                <p className="eyebrow section-eyebrow">ANALYSIS HISTORY</p>
+                <h2 className="section-title">{showArchived ? "Archived attempts" : "Recent attempts"}</h2>
+                <p className="section-subtitle">Open recently generated videos, reports, and run graphs across all clients.</p>
+              </div>
+              <div className="filter-pill-group">
+                <button
+                  type="button"
+                  className={`filter-pill-btn ${!showArchived ? "active" : ""}`}
+                  onClick={() => { setShowArchived(false); setDisplayCount(12); }}
+                >
+                  Active runs
+                </button>
+                <button
+                  type="button"
+                  className={`filter-pill-btn ${showArchived ? "active" : ""}`}
+                  onClick={() => { setShowArchived(true); setDisplayCount(12); }}
+                >
+                  Archived runs
+                </button>
               </div>
             </div>
+
+            {/* Advanced Search & Day-wise Filter Controls */}
+            <div className="runs-filter-bar">
+              <ClientSearchBox
+                clients={clients}
+                query={runSearchQuery}
+                onQueryChange={(value) => { setRunSearchQuery(value); setDisplayCount(12); }}
+                selected={selectedRunClient}
+                onSelect={(client) => { setSelectedRunClient(client); setRunSearchQuery(""); setDisplayCount(12); }}
+                onClear={() => { setSelectedRunClient(null); setDisplayCount(12); }}
+              />
+
+              <div className="runs-filter-controls">
+                <DateNavigator value={effectiveDay} onChange={(key) => { setSelectedDay(key); setDayChosen(true); setDisplayCount(12); }} />
+
+                {isAnyFilterActive && (
+                  <button type="button" className="btn-clear-filters" onClick={clearFilters} title="Reset all filters">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                      <line x1="18" y1="6" x2="6" y2="18" />
+                      <line x1="6" y1="6" x2="18" y2="18" />
+                    </svg>
+                    Reset
+                  </button>
+                )}
+              </div>
+            </div>
+
+            <div className="runs-filter-status-row">
+              <span className="runs-count-badge">
+                Showing <strong>{displayedAttempts.length}</strong> of <strong>{filteredAttempts.length}</strong> runs
+                {effectiveDay ? ` · ${dayLabel(effectiveDay)}` : " · All dates"}
+                {selectedRunClient
+                  ? ` · ${selectedRunClient.name}`
+                  : debouncedRunSearch && ` · matching “${debouncedRunSearch}”`}
+              </span>
+            </div>
+
             {attemptsLoading ? (
               <div className="empty-state" style={{ padding: '48px 0', color: 'var(--blue)' }}>
                 Loading {showArchived ? "archived" : "active"} attempts...
@@ -1993,13 +3473,28 @@ function AdminDashboard() {
                       onArchive={handleArchive}
                       onRestore={handleRestore}
                       onDelete={handleDelete}
+                      onUpdateNotes={handleUpdateNotes}
+                      isAdmin={true}
                     />
-                  )) : <EmptyState text={showArchived ? "No archived attempts." : "No attempts have been generated yet."} />}
+                  )) : (
+                    <FunEmptyState
+                      kind={
+                        runSearchLabel ? "search"
+                          : showArchived ? "archived"
+                            : !effectiveDay ? "none"
+                              : effectiveDay === todayKey() ? "today" : "day"
+                      }
+                      q={runSearchLabel}
+                      day={effectiveDay}
+                      actionLabel={effectiveDay ? "Show all dates" : undefined}
+                      onAction={() => { setSelectedDay(""); setDayChosen(true); }}
+                    />
+                  )}
                 </div>
                 {hasMore && (
                   <div className="load-more-row">
                     <button className="secondary-button" onClick={() => setDisplayCount(prev => prev + 8)}>
-                      Load 8 More ({attempts.length - displayCount} remaining)
+                      Load 8 More ({filteredAttempts.length - displayCount} remaining)
                     </button>
                   </div>
                 )}
@@ -2045,7 +3540,7 @@ function AdminDashboard() {
           </label>
           <div className="user-list athlete-directory-list">
             {searchedClients.map((user) => {
-              const runCount = attempts.filter((attempt) => attempt.person_id === user.id).length;
+              const runCount = user.run_count ?? 0;
               return (
                 <button
                   type="button"
@@ -2060,9 +3555,14 @@ function AdminDashboard() {
                 </button>
               );
             })}
-            {!clients.length && <EmptyState text="No client accounts yet." />}
+            {!clients.length && <FunEmptyState kind="noClients" />}
             {clients.length > 0 && !searchedClients.length && (
-              <EmptyState text={`No athletes match "${clientSearch.trim()}".`} />
+              <FunEmptyState
+                kind="clients"
+                q={clientSearch.trim()}
+                actionLabel="Clear search"
+                onAction={() => setClientSearch("")}
+              />
             )}
           </div>
         </section>
@@ -2084,12 +3584,80 @@ function EmptyState({ text }) {
   return <div className="empty-state">{text}</div>;
 }
 
+// Light-hearted copy for empty results. {q} is the search text, {day} the date phrase.
+const EMPTY_MESSAGES = {
+  today: [
+    ["🏔️", "The slopes are quiet today", "No runs yet. The skis are lowkey waiting for their main character moment."],
+    ["🫥", "It's giving… empty", "Zero runs today. Upload one and let the analysis cook."],
+    ["🧢", "No runs, no cap", "Today's feed is out touching grass. Upload a run to change that."],
+  ],
+  day: [
+    ["🎿", "Nobody shredded {day}", "That day was a vibe check nobody showed up for."],
+    ["😴", "{Day} said “not today”", "No runs recorded. The mountain was in its rest era."],
+    ["👻", "Ghost town {day}", "Not a single run. Try another day, or see every date."],
+  ],
+  search: [
+    ["🔍", "No runs for “{q}”", "We looked everywhere. They might be in their off-season era."],
+    ["🤷", "“{q}”? Never heard of them", "No runs match. Double-check the name or email, bestie."],
+    ["🙅", "It's a no from us", "Nothing matches “{q}”. Try another spelling or another day."],
+  ],
+  archived: [
+    ["📦", "Nothing in the archive", "Clean slate. Very organised of you, honestly."],
+    ["✨", "Archive is spotless", "No archived runs here. Marie Kondo would be proud."],
+  ],
+  none: [
+    ["🚀", "No runs yet", "The first upload is where the glow-up begins."],
+    ["🌨️", "Fresh powder, zero tracks", "Upload the first run and let's see what this crew can do."],
+  ],
+  athlete: [
+    ["🎿", "No runs here yet", "This athlete's highlight reel is loading. First upload, let's go."],
+    ["⏳", "Highlight reel pending", "No runs to show yet. The comeback starts with one upload."],
+  ],
+  clients: [
+    ["🕵️", "No athletes found", "“{q}” isn't on the roster. Typo, or a new recruit?"],
+    ["🫠", "Zero matches for “{q}”", "Not in the squad (yet). Check the spelling, bestie."],
+  ],
+  noClients: [
+    ["👋", "No athletes yet", "The roster is giving empty. Add the first athlete to get things rolling."],
+  ],
+};
+
+function pickEmptyMessage(kind, { q = "", day = "" } = {}) {
+  const options = EMPTY_MESSAGES[kind] || EMPTY_MESSAGES.none;
+  // Stable choice per situation so auto-refresh does not swap the joke.
+  const seed = `${kind}|${q}|${day}`.split("").reduce((sum, ch) => (sum * 31 + ch.charCodeAt(0)) >>> 0, 7);
+  const [emoji, title, body] = options[seed % options.length];
+  const phrase = day ? dayPhrase(day) : "";
+  const fill = (text) => text
+    .replaceAll("{q}", q)
+    .replaceAll("{Day}", phrase ? phrase.charAt(0).toUpperCase() + phrase.slice(1) : "")
+    .replaceAll("{day}", phrase);
+  return { emoji, title: fill(title), body: fill(body) };
+}
+
+function FunEmptyState({ kind, q, day, actionLabel, onAction }) {
+  const { emoji, title, body } = pickEmptyMessage(kind, { q, day });
+  return (
+    <div className="fun-empty-state" role="status">
+      <span className="fun-empty-emoji" aria-hidden="true">{emoji}</span>
+      <h3>{title}</h3>
+      <p>{body}</p>
+      {actionLabel && onAction && (
+        <button type="button" className="secondary-button fun-empty-action" onClick={onAction}>
+          {actionLabel}
+        </button>
+      )}
+    </div>
+  );
+}
+
 function App() {
   const path = useRoute();
   const component = useMemo(() => {
     const athleteProfileMatch = path.match(/^\/admin\/athletes\/(\d+)$/);
     if (path === "/signup") return <AuthForm type="signup" />;
     if (path === "/admin-login") return <AuthForm type="admin" />;
+    if (path === "/forgot-password") return <ForgotPasswordForm />;
     if (athleteProfileMatch) return <AdminAthleteProfile userId={Number(athleteProfileMatch[1])} />;
     if (path === "/admin") return <AdminDashboard />;
     if (path === "/dashboard") return <ClientDashboard />;

@@ -20,6 +20,7 @@ from database import (
 from models.person import Person
 from models.video_analysis import VideoAnalysis
 from models.analysis_timeline import AnalysisTimeline
+from models.email_otp import EmailOTP  # noqa: F401  (registers table for create_all)
 from schemas.person import PersonIDName
 import crud.person as person_crud
 import crud.video_analysis as video_crud

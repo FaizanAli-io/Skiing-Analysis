@@ -10,6 +10,13 @@ from typing import List, Optional
 router = APIRouter(prefix="/jobs", tags=["Jobs"])
 
 
+def _visible_error(job, user: Person) -> Optional[str]:
+    """Raw pipeline errors can expose server paths; clients get a plain message."""
+    if user.role == "admin" or not job.error_message:
+        return job.error_message
+    return "Processing failed. Please contact your coach."
+
+
 @router.get("/{job_id}", response_model=JobStatusWithResult)
 def get_job_status(
     job_id: str,
@@ -43,7 +50,7 @@ def get_job_status(
         display_mode=job.display_mode,
         status=job.status,
         progress=job.progress,
-        error_message=job.error_message,
+        error_message=_visible_error(job, current_user),
         created_at=job.created_at,
         started_at=job.started_at,
         completed_at=job.completed_at,
@@ -92,7 +99,7 @@ def list_jobs(
             display_mode=job.display_mode,
             status=job.status,
             progress=job.progress,
-            error_message=job.error_message,
+            error_message=_visible_error(job, current_user),
             created_at=job.created_at,
             started_at=job.started_at,
             completed_at=job.completed_at,

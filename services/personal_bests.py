@@ -26,7 +26,7 @@ METRIC_LABELS = {
     "pressure": "Pressure",
     "balance": "Balance",
     "rotation": "Rotation",
-    "edging": "Edging",
+    "edging": "Parallelism",
 }
 
 METRIC_KEYS = tuple(METRIC_FIELDS)
@@ -102,6 +102,7 @@ def _record(
     metric: str,
     score: int,
     session_number: int,
+    run_number: Optional[int] = None,
 ) -> Dict[str, Any]:
     return {
         "metric": metric,
@@ -112,7 +113,8 @@ def _record(
         "date": _date_key(attempt),
         "session_number": session_number,
         "run_number": int(
-            getattr(attempt, "attempt_number", None)
+            run_number
+            or getattr(attempt, "attempt_number", None)
             or getattr(attempt, "id", 0)
             or 0
         ),
@@ -141,13 +143,21 @@ def _comparison(
     }
 
 
-def build_personal_best_history(attempts: Iterable[Any]) -> Dict[str, Any]:
-    """Build all-time records and per-run comparisons from valid attempts."""
+def build_personal_best_history(attempts: Iterable[Any], client_numbering: bool = False) -> Dict[str, Any]:
+    """Build all-time records and per-run comparisons from valid attempts.
+
+    With ``client_numbering`` run numbers are the athlete's own sequence
+    (first visible run = 1, no gaps) instead of the internal attempt number.
+    """
     ordered = sorted(
         (attempt for attempt in attempts if is_completed_attempt(attempt)),
         key=_sort_key,
     )
     sessions = _session_numbers(ordered)
+    positions = {
+        int(getattr(attempt, "id", 0) or 0): index + 1
+        for index, attempt in enumerate(ordered)
+    } if client_numbering else {}
     running_records: Dict[str, Dict[str, Any]] = {}
     achievements: Dict[int, List[str]] = defaultdict(list)
     previous_by_attempt: Dict[int, Dict[str, Optional[Dict[str, Any]]]] = {}
@@ -166,6 +176,7 @@ def build_personal_best_history(attempts: Iterable[Any]) -> Dict[str, Any]:
                 metric,
                 score,
                 sessions[_date_key(attempt)],
+                positions.get(attempt_id),
             )
             if previous is None:
                 running_records[metric] = current_record
@@ -187,7 +198,9 @@ def build_personal_best_history(attempts: Iterable[Any]) -> Dict[str, Any]:
             "session_date": date_key,
             "session_number": sessions[date_key],
             "run_number": int(
-                getattr(attempt, "attempt_number", None) or attempt_id
+                positions.get(attempt_id)
+                or getattr(attempt, "attempt_number", None)
+                or attempt_id
             ),
         }
         comparisons: Dict[str, Dict[str, Any]] = {}
@@ -201,6 +214,7 @@ def build_personal_best_history(attempts: Iterable[Any]) -> Dict[str, Any]:
                 metric,
                 score,
                 sessions[date_key],
+                positions.get(attempt_id),
             )
             if previous is None:
                 status = "baseline"
@@ -299,14 +313,14 @@ def _completed_attempts_query(db):
     )
 
 
-def personal_bests_for_person(db, person_id: int) -> Dict[str, Dict[str, Any]]:
+def personal_bests_for_person(db, person_id: int, client_numbering: bool = False) -> Dict[str, Dict[str, Any]]:
     attempts = (
         _completed_attempts_query(db)
         .filter(VideoAnalysis.person_id == person_id)
         .order_by(VideoAnalysis.created_at.asc().nullsfirst(), VideoAnalysis.id.asc())
         .all()
     )
-    return build_personal_best_history(attempts)["personal_bests"]
+    return build_personal_best_history(attempts, client_numbering)["personal_bests"]
 
 
 def pre_run_personal_best_context(
@@ -314,26 +328,33 @@ def pre_run_personal_best_context(
     person_id: int,
     session_date: str,
 ) -> Dict[str, Any]:
-    """Return records and the date-derived session number before a new run."""
+    """Return records and the date-derived session number before a new run.
+
+    Everything here feeds client-facing output (PDF, video label), so run
+    numbers use the athlete's own sequence.
+    """
     attempts = (
         _completed_attempts_query(db)
         .filter(VideoAnalysis.person_id == person_id)
         .order_by(VideoAnalysis.created_at.asc().nullsfirst(), VideoAnalysis.id.asc())
         .all()
     )
-    history = build_personal_best_history(attempts)
+    history = build_personal_best_history(attempts, client_numbering=True)
     existing_dates = sorted({_date_key(attempt) for attempt in attempts})
     if session_date in existing_dates:
         session_number = existing_dates.index(session_date) + 1
     else:
         session_number = len(existing_dates) + 1
+    ordered = sorted((a for a in attempts if is_completed_attempt(a)), key=_sort_key)
     return {
         "personal_bests": history["personal_bests"],
         "session_number": max(1, session_number),
+        "first_run_blue_iq": metric_score(ordered[0], "blue_iq") if ordered else None,
+        "client_run_number": len(ordered) + 1,
     }
 
 
-def enrich_attempts(db, attempts: Sequence[VideoAnalysis]) -> Sequence[VideoAnalysis]:
+def enrich_attempts(db, attempts: Sequence[VideoAnalysis], client_numbering: bool = False) -> Sequence[VideoAnalysis]:
     """Attach computed PB fields consumed by the Pydantic response schema."""
     person_ids = sorted({attempt.person_id for attempt in attempts if attempt.person_id})
     if not person_ids:
@@ -352,7 +373,7 @@ def enrich_attempts(db, attempts: Sequence[VideoAnalysis]) -> Sequence[VideoAnal
         grouped[int(attempt.person_id)].append(attempt)
 
     calculated = {
-        person_id: build_personal_best_history(rows)
+        person_id: build_personal_best_history(rows, client_numbering)
         for person_id, rows in grouped.items()
     }
     for attempt in attempts:
@@ -429,3 +450,116 @@ def build_leaderboards(db, limit: int = 50) -> Dict[str, List[Dict[str, Any]]]:
             record["rank"] = rank
         leaderboards[metric] = ordered
     return leaderboards
+
+
+def report_context_for_attempt(db, attempt: VideoAnalysis) -> Dict[str, Any]:
+    """Rebuild the PB context a saved run's report was originally made with.
+
+    Only runs that came before this one count, so a regenerated report shows
+    the same personal-best comparisons as the original.
+    """
+    attempts = (
+        _completed_attempts_query(db)
+        .filter(VideoAnalysis.person_id == attempt.person_id)
+        .all()
+    )
+    ordered = sorted(attempts, key=_sort_key)
+    target_key = _sort_key(attempt)
+    earlier = [
+        row for row in ordered
+        if row.id != attempt.id and _sort_key(row) < target_key
+    ]
+    sessions = _session_numbers(ordered if attempt in ordered else [*ordered, attempt])
+    return {
+        "session_date": _date_key(attempt),
+        "session_number": sessions.get(_date_key(attempt)),
+        "client_run_number": len(earlier) + 1,
+        "previous_personal_bests": build_personal_best_history(earlier, client_numbering=True)["personal_bests"],
+        "first_run_blue_iq": metric_score(earlier[0], "blue_iq") if earlier else None,
+    }
+
+
+def completed_history_query(db, person_id: int):
+    """A person's completed, non-archived runs, oldest first."""
+    return (
+        _completed_attempts_query(db)
+        .filter(VideoAnalysis.person_id == person_id)
+        .order_by(VideoAnalysis.created_at.asc().nullsfirst(), VideoAnalysis.id.asc())
+    )
+
+
+def build_performance_trends(
+    all_attempts: Sequence[Any],
+    limit: Optional[int] = None,
+    client_numbering: bool = False,
+) -> Dict[str, Any]:
+    """Run-history chart data plus each metric compared with the first run.
+
+    ``all_attempts`` must be the person's completed runs, oldest first. All
+    runs are returned unless ``limit`` asks for only the most recent ones.
+    """
+    if not all_attempts:
+        return {"error": "No completed runs are available yet", "total_runs": 0}
+
+    history = build_personal_best_history(all_attempts, client_numbering)
+    metadata = history["metadata_by_attempt"]
+    first, latest = all_attempts[0], all_attempts[-1]
+    attempts = list(all_attempts[-int(limit):]) if limit and int(limit) > 0 else list(all_attempts)
+    dates = [_date_key(attempt) for attempt in attempts]
+    time_series: Dict[str, Any] = {
+        "dates": dates,
+        "runs": [int(metadata.get(int(attempt.id), {}).get("run_number") or attempt.id) for attempt in attempts],
+        "turns": [attempt.turns or 0 for attempt in attempts],
+    }
+    for metric in METRIC_KEYS:
+        time_series[metric] = [metric_score(attempt, metric) or 0 for attempt in attempts]
+
+    first_meta = metadata.get(int(first.id), {})
+    first_run = {
+        "analysis_id": int(first.id),
+        "date": first_meta.get("session_date"),
+        "session_number": first_meta.get("session_number"),
+        "run_number": first_meta.get("run_number"),
+        "scores": {metric: metric_score(first, metric) for metric in METRIC_KEYS},
+    }
+    current_vs_first_run = {}
+    for metric in METRIC_KEYS:
+        current = metric_score(latest, metric)
+        baseline = first_run["scores"][metric]
+        if current is None or baseline is None:
+            continue
+        current_vs_first_run[metric] = {
+            "metric": metric,
+            "label": METRIC_LABELS[metric],
+            "current_score": current,
+            "first_run_score": baseline,
+            "difference": current - baseline,
+            "is_first_run": int(latest.id) == int(first.id),
+        }
+
+    latest_meta = metadata.get(int(latest.id), {})
+    return {
+        "total_runs": len(all_attempts),
+        "displayed_runs": len(attempts),
+        "date_range": {"start": dates[0], "end": dates[-1]},
+        "time_series": time_series,
+        "personal_bests": history["personal_bests"],
+        "current_vs_personal_best": history["comparisons_by_attempt"].get(int(latest.id), {}),
+        "first_run": first_run,
+        "current_vs_first_run": current_vs_first_run,
+        "current_session_number": latest_meta.get("session_number"),
+    }
+
+
+def client_run_number(db, attempt: VideoAnalysis) -> Optional[int]:
+    """The athlete-facing number of one run (1 = their first visible run)."""
+    rows = (
+        _completed_attempts_query(db)
+        .filter(VideoAnalysis.person_id == attempt.person_id)
+        .all()
+    )
+    ordered = sorted(rows, key=_sort_key)
+    for index, row in enumerate(ordered):
+        if row.id == attempt.id:
+            return index + 1
+    return None
