@@ -47,6 +47,9 @@ class VideoAnalysisOut(VideoAnalysisCreate):
     notes_source: Optional[str] = None
     available_downloads: Dict[str, List[str]] = Field(default_factory=dict)
     downloads_pending: bool = False
+    pending_downloads: List[str] = Field(default_factory=list)
+    download_progress: Dict[str, int] = Field(default_factory=dict)
+    preparable_downloads: Dict[str, List[str]] = Field(default_factory=dict)
 
     @field_validator("is_archived", mode="before")
     @classmethod
@@ -88,6 +91,9 @@ class ClientAttemptOut(BaseModel):
     new_personal_bests: List[str] = Field(default_factory=list)
     available_downloads: Dict[str, List[str]] = Field(default_factory=dict)
     downloads_pending: bool = False
+    pending_downloads: List[str] = Field(default_factory=list)
+    download_progress: Dict[str, int] = Field(default_factory=dict)
+    preparable_downloads: Dict[str, List[str]] = Field(default_factory=dict)
 
     class Config:
         from_attributes = True

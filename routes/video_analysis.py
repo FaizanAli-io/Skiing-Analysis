@@ -17,7 +17,7 @@ from services.auth import (
 )
 from services.aws_s3 import S3Manager
 from services.personal_bests import client_run_number
-from services.video_exports import FORMATS, MODES
+from services.video_exports import FORMATS, MODES, request_variant
 
 
 router = APIRouter(prefix="/videos", tags=["Video Analysis"])
@@ -87,9 +87,47 @@ def get_download_url(
             "filename": filename,
         }
 
-    if video.downloads_pending:
+    if f"{mode}:{fmt}" in video.pending_downloads:
         raise HTTPException(status_code=409, detail="This version is still being prepared. Please try again in a minute.")
     raise HTTPException(status_code=404, detail="This version is not available for this run")
+
+
+@router.post("/{video_id}/prepare")
+def prepare_download(
+    video_id: int,
+    format: str = Query(...),
+    mode: str = Query(...),
+    current_user: Person = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Start rendering a version that has not been made yet."""
+    video = _authorized_video(db, video_id, current_user)
+    fmt = _validate(format, FORMATS, "format", "original")
+    mode = _validate(mode, MODES, "mode", video.main_video_mode)
+    if fmt in video.available_downloads.get(mode, []):
+        return {"status": "ready"}
+    if f"{mode}:{fmt}" in video.pending_downloads:
+        return {"status": "preparing"}
+    if fmt not in video.preparable_downloads.get(mode, []):
+        raise HTTPException(status_code=404, detail="This version can no longer be made for this run")
+    request_variant(video.id, mode, fmt, requester_id=current_user.id)
+    return {"status": "preparing"}
+
+
+@router.get("/{video_id}/download-status")
+def download_status(
+    video_id: int,
+    current_user: Person = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Light polling endpoint for the download menu while a version renders."""
+    video = _authorized_video(db, video_id, current_user)
+    return {
+        "available_downloads": video.available_downloads,
+        "pending_downloads": video.pending_downloads,
+        "preparable_downloads": video.preparable_downloads,
+        "download_progress": video.download_progress,
+    }
 
 
 @router.get("/{video_id}/download")

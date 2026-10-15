@@ -21,17 +21,24 @@ ANALYSIS_LOG_PATH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
     "ski_analysis.log",
 )
+# Detailed per-frame scoring dumps (~700 KB per video) are a debugging aid;
+# set FRAME_METRICS_LOG=true to write them to ski_analysis.log again.
+FRAME_METRICS_LOG_ENABLED = os.getenv("FRAME_METRICS_LOG", "false").strip().lower() in {"1", "true", "yes", "on"}
+
 frame_metrics_logger = logging.getLogger("blueiq.frame_metrics")
 frame_metrics_logger.handlers.clear()
 frame_metrics_logger.propagate = False
 frame_metrics_logger.setLevel(logging.INFO)
-frame_console_handler = logging.StreamHandler()
-frame_console_handler.setFormatter(logging.Formatter("%(message)s"))
-frame_metrics_logger.addHandler(frame_console_handler)
-
+frame_metrics_logger.disabled = not FRAME_METRICS_LOG_ENABLED
+if FRAME_METRICS_LOG_ENABLED:
+    frame_console_handler = logging.StreamHandler()
+    frame_console_handler.setFormatter(logging.Formatter("%(message)s"))
+    frame_metrics_logger.addHandler(frame_console_handler)
 
 def _reset_frame_metrics_log():
     """Reuse and truncate ski_analysis.log for each video analysis."""
+    if not FRAME_METRICS_LOG_ENABLED:
+        return
     for handler in list(frame_metrics_logger.handlers):
         if isinstance(handler, logging.FileHandler):
             frame_metrics_logger.removeHandler(handler)
@@ -351,8 +358,8 @@ def analyze_video(
     session_date = session_date or date.today().isoformat()
     
     try:
-        # Load YOLO model
-        logger.info("Loading YOLO model...")
+        # Load YOLO fresh for every video: reusing a model across videos
+        # carries tracking state over and changes the scores.
         model = YOLO("yolov8n.pt")
         logger.info("YOLO model loaded successfully")
 
@@ -569,6 +576,15 @@ def analyze_video(
         logger.info(f"Starting main video processing loop with rotation angle: {detected_angle}Â°")
         
         while cap.isOpened():
+            # Only every `frame_skip`-th frame is analysed; advance past the
+            # others without decoding them.
+            if frame_count % frame_skip != 0:
+                if not cap.grab():
+                    logger.info("End of video reached or error reading frame")
+                    break
+                frame_count += 1
+                continue
+
             ret, frame = cap.read()
             if not ret:
                 logger.info("End of video reached or error reading frame")
@@ -1259,57 +1275,58 @@ def analyze_video(
                 edging_lateral_component = frame_score_details[
                     "edging_lateral_score"
                 ]
-                frame_metrics_logger.info("\n".join([
-                    "=" * 72,
-                    f"FRAME {processed_frames}",
-                    "=" * 72,
-                    "PRESSURE",
-                    f"  Current frame score        : {frame_pressure_score:.1f}/240",
-                    f"  Running average (displayed): {Blue_pressure_final:.1f}/240",
-                    f"  Current knee flexion       : {pressure_degree_text}",
-                    "  Vertical movement range    : "
-                    f"{frame_score_details['pressure_vertical_range'] * 100:.2f}% body height",
-                    "  Vertical range score       : "
-                    f"{frame_score_details['pressure_vertical_score']:.1f}/240 (75%)",
-                    "  Knee flexion range         : "
-                    f"{frame_score_details['pressure_knee_range']:.1f} deg",
-                    "  Knee range score           : "
-                    f"{frame_score_details['pressure_knee_range_score']:.1f}/240 (25%)",
-                    "-" * 72,
-                    "BALANCE",
-                    f"  Current frame score        : {balance_frame_score_text}",
-                    f"  Running average (displayed): {Blue_balance_final:.1f}/240",
-                    f"  CoM lateral offset         : {balance_offset_text}",
-                    f"  CoM plumb angle            : {balance_angle_text}",
-                    f"  Lateral spread (std dev)   : {balance_spread_text}",
-                    f"  Spread quality             : {balance_spread_score_text} (35%)",
-                    f"  Smoothness quality         : {balance_smoothness_score_text} (40%)",
-                    f"  Rhythm/symmetry quality    : {balance_rhythm_score_text} (25%)",
-                    "-" * 72,
-                    "ROTATION",
-                    f"  Current frame score        : {frame_rotation_score:.1f}/240",
-                    f"  Running average (displayed): {Blue_rotation_final:.1f}/240",
-                    f"  Body separation degree    : {rotation_degree_text}",
-                    f"  Body separation score     : {separation_score_text} (60%)",
-                    "  Direction-change score     : "
-                    f"{frame_score_details['rotation_direction_change_score']:.1f}/240 (10%)",
-                    "  Lateral score (recent 5)   : "
-                    f"{frame_score_details['rotation_lateral_score']:.1f}/240 (30%)",
-                    "-" * 72,
-                    "PARALLELISM",
-                    f"  Current frame score        : {frame_edging_score:.1f}/240",
-                    f"  Running average (displayed): {Blue_edging_final:.1f}/240",
-                    f"  Ski parallelism angle      : {ski_parallelism_angle_text}",
-                    "  Parallelism component      : "
-                    f"{edging_parallelism_component:.1f}/240 x 70% = "
-                    f"{0.70 * edging_parallelism_component:.1f}",
-                    f"  Edge angle ({edge_angle_source}) : {edge_angle_text}",
-                    "  Edge-angle scoring         : ignored (display only)",
-                    f"  Lateral movement (recent 5): {lateral_movement_text}",
-                    "  Lateral component (recent 5): "
-                    f"{edging_lateral_component:.1f}/240 x 30% = "
-                    f"{0.30 * edging_lateral_component:.1f}",
-                ]))
+                if FRAME_METRICS_LOG_ENABLED:
+                    frame_metrics_logger.info("\n".join([
+                        "=" * 72,
+                        f"FRAME {processed_frames}",
+                        "=" * 72,
+                        "PRESSURE",
+                        f"  Current frame score        : {frame_pressure_score:.1f}/240",
+                        f"  Running average (displayed): {Blue_pressure_final:.1f}/240",
+                        f"  Current knee flexion       : {pressure_degree_text}",
+                        "  Vertical movement range    : "
+                        f"{frame_score_details['pressure_vertical_range'] * 100:.2f}% body height",
+                        "  Vertical range score       : "
+                        f"{frame_score_details['pressure_vertical_score']:.1f}/240 (75%)",
+                        "  Knee flexion range         : "
+                        f"{frame_score_details['pressure_knee_range']:.1f} deg",
+                        "  Knee range score           : "
+                        f"{frame_score_details['pressure_knee_range_score']:.1f}/240 (25%)",
+                        "-" * 72,
+                        "BALANCE",
+                        f"  Current frame score        : {balance_frame_score_text}",
+                        f"  Running average (displayed): {Blue_balance_final:.1f}/240",
+                        f"  CoM lateral offset         : {balance_offset_text}",
+                        f"  CoM plumb angle            : {balance_angle_text}",
+                        f"  Lateral spread (std dev)   : {balance_spread_text}",
+                        f"  Spread quality             : {balance_spread_score_text} (35%)",
+                        f"  Smoothness quality         : {balance_smoothness_score_text} (40%)",
+                        f"  Rhythm/symmetry quality    : {balance_rhythm_score_text} (25%)",
+                        "-" * 72,
+                        "ROTATION",
+                        f"  Current frame score        : {frame_rotation_score:.1f}/240",
+                        f"  Running average (displayed): {Blue_rotation_final:.1f}/240",
+                        f"  Body separation degree    : {rotation_degree_text}",
+                        f"  Body separation score     : {separation_score_text} (60%)",
+                        "  Direction-change score     : "
+                        f"{frame_score_details['rotation_direction_change_score']:.1f}/240 (10%)",
+                        "  Lateral score (recent 5)   : "
+                        f"{frame_score_details['rotation_lateral_score']:.1f}/240 (30%)",
+                        "-" * 72,
+                        "PARALLELISM",
+                        f"  Current frame score        : {frame_edging_score:.1f}/240",
+                        f"  Running average (displayed): {Blue_edging_final:.1f}/240",
+                        f"  Ski parallelism angle      : {ski_parallelism_angle_text}",
+                        "  Parallelism component      : "
+                        f"{edging_parallelism_component:.1f}/240 x 70% = "
+                        f"{0.70 * edging_parallelism_component:.1f}",
+                        f"  Edge angle ({edge_angle_source}) : {edge_angle_text}",
+                        "  Edge-angle scoring         : ignored (display only)",
+                        f"  Lateral movement (recent 5): {lateral_movement_text}",
+                        "  Lateral component (recent 5): "
+                        f"{edging_lateral_component:.1f}/240 x 30% = "
+                        f"{0.30 * edging_lateral_component:.1f}",
+                    ]))
 
                 score_timeline.append(build_timeline_sample(
                     time_seconds=round(processed_frames / output_fps, 2),
@@ -1443,7 +1460,7 @@ def analyze_video(
         #         logger.error("ffmpeg binary not found on PATH, keeping mp4v output")
         # Transcode to browser-compatible H.264 using libx264 explicitly.
         if 'output_path' in locals() and os.path.exists(output_path):
-            transcode_to_h264(output_path)
+            transcode_to_h264(output_path, preset="veryfast")
     # Final calculations
     logger.info("Calculating final scores...")
     try:

@@ -19,8 +19,10 @@ frames. Athlete-mode social crops use every source frame (up to 30 fps).
 import json
 import logging
 import os
+import shutil
 import threading
-from concurrent.futures import ThreadPoolExecutor
+import uuid
+from concurrent.futures import ThreadPoolExecutor, wait as wait_for_futures
 from datetime import datetime, timedelta
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -76,6 +78,11 @@ _PILLAR_KEYS = (
 
 # A run still "preparing" after this long was interrupted (e.g. a restart).
 PENDING_TIMEOUT = timedelta(hours=2)
+# A live render touches its run at least every HEARTBEAT; one that has been
+# silent for STALL_AFTER died with its process and is requeued.
+HEARTBEAT_SECONDS = 30
+STALL_AFTER = timedelta(minutes=2)
+MAX_RENDER_ATTEMPTS = 3
 
 LOGO_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bluerun.png")
 
@@ -423,7 +430,12 @@ def _open_writer(path: str, fps: float, size: Tuple[int, int]) -> cv2.VideoWrite
     return writer
 
 
-def _render_social(manifest: Dict[str, Any], mode: str, fmt: str, path: str) -> None:
+def _frame_total(manifest: Dict[str, Any], analysed_only: bool) -> int:
+    indices = manifest.get("processed_indices") or [0]
+    return len(indices) if analysed_only else max(indices) + 1
+
+
+def _render_social(manifest: Dict[str, Any], mode: str, fmt: str, path: str, progress=None) -> None:
     size = SOCIAL_SIZES[fmt]
     tracker = _CropTracker(manifest)
     watermark = _watermark(*size)
@@ -434,12 +446,15 @@ def _render_social(manifest: Dict[str, Any], mode: str, fmt: str, path: str) -> 
         fps = manifest["source_fps"] / stride
         writer = _open_writer(path, fps, size)
         try:
+            total = _frame_total(manifest, analysed_only=False)
             for index, frame in _source_frames(manifest):
                 center = tracker.advance(index)
                 if index % stride:
                     continue
                 writer.write(_apply_watermark(tracker.crop(frame, center, size), watermark))
                 written += 1
+                if progress:
+                    progress(index / total)
             _write_end_card(writer, size, fps, manifest["blue_iq"])
         finally:
             writer.release()
@@ -457,6 +472,8 @@ def _render_social(manifest: Dict[str, Any], mode: str, fmt: str, path: str) -> 
                 composite = _composite_on_source(frame, layer, geometry)
                 writer.write(_apply_watermark(tracker.crop(composite, center, size), watermark))
                 written += 1
+                if progress:
+                    progress(written / _frame_total(manifest, analysed_only=True))
             _write_end_card(writer, size, fps, manifest["blue_iq"])
         finally:
             writer.release()
@@ -471,7 +488,7 @@ def _write_end_card(writer: cv2.VideoWriter, size: Tuple[int, int], fps: float, 
         writer.write(card)
 
 
-def _render_original(manifest: Dict[str, Any], mode: str, path: str) -> None:
+def _render_original(manifest: Dict[str, Any], mode: str, path: str, progress=None) -> None:
     """The 16:9 sidebar video in the mode the run was *not* analysed in."""
     from services.new_utils import resize_and_center_frame
     from services.overlay_renderers import create_premium_overlay
@@ -500,6 +517,8 @@ def _render_original(manifest: Dict[str, Any], mode: str, path: str) -> None:
                 writer = _open_writer(path, manifest["output_fps"], (premium.shape[1], premium.shape[0]))
             writer.write(premium)
             written += 1
+            if progress:
+                progress(written / _frame_total(manifest, analysed_only=True))
     finally:
         if writer is not None:
             writer.release()
@@ -507,13 +526,18 @@ def _render_original(manifest: Dict[str, Any], mode: str, path: str) -> None:
         raise RuntimeError(f"rendered {written} of {len(manifest['processed_indices'])} frames")
 
 
-def render_variant(manifest: Dict[str, Any], mode: str, fmt: str) -> str:
+def render_variant(manifest: Dict[str, Any], mode: str, fmt: str, progress=None) -> str:
+    """Render one version. ``progress(fraction)`` gets 0..1 updates (optional)."""
     path = f"{manifest['base']}_{mode}_{fmt}.mp4"
+    # Frames are ~80% of the work; encoding the H.264 file is the rest.
+    frames_progress = (lambda f: progress(0.8 * min(1.0, f))) if progress else None
     try:
         if fmt == "original":
-            _render_original(manifest, mode, path)
+            _render_original(manifest, mode, path, frames_progress)
         else:
-            _render_social(manifest, mode, fmt, path)
+            _render_social(manifest, mode, fmt, path, frames_progress)
+        if progress:
+            progress(0.85)
         transcode_to_h264(path, preset="veryfast", threads=_encoder_threads(), low_priority=True)
         return path
     except Exception:
@@ -583,9 +607,29 @@ def _store_variant(analysis_id: int, mode: str, fmt: str, path: str) -> None:
     _update_run(analysis_id, change)
 
 
+def _progress_reporter(analysis_id: int, key: str):
+    """Write render progress to the run, at most every 10%."""
+    last = {"step": -1}
+
+    def report(fraction: float) -> None:
+        step = int(max(0.0, min(1.0, fraction)) * 10)
+        if step <= last["step"]:
+            return
+        last["step"] = step
+
+        def change(run):
+            values = dict(run.export_progress or {})
+            values[key] = step * 10
+            run.export_progress = values
+
+        _update_run(analysis_id, change)
+
+    return report
+
+
 def _run_variant(analysis_id: int, manifest: Dict[str, Any], mode: str, fmt: str) -> bool:
     try:
-        path = render_variant(manifest, mode, fmt)
+        path = render_variant(manifest, mode, fmt, _progress_reporter(analysis_id, _variant_key(mode, fmt)))
         _store_variant(analysis_id, mode, fmt, path)
         logger.info("Export ready for analysis %s: %s/%s", analysis_id, mode, fmt)
         return True
@@ -594,41 +638,483 @@ def _run_variant(analysis_id: int, manifest: Dict[str, Any], mode: str, fmt: str
         return False
 
 
-def _finalize(analysis_id: int, manifest: Dict[str, Any], futures, cleanup_paths: List[str]) -> None:
+SOURCE_PREFIX = "export-sources"
+
+
+def _variant_key(mode: str, fmt: str) -> str:
+    return f"{mode}:{fmt}"
+
+
+def _parse_variant(value: str) -> Optional[Tuple[str, str]]:
+    mode, _, fmt = str(value).partition(":")
+    return (mode, fmt) if mode in MODES and fmt in FORMATS else None
+
+
+def eager_variants(display_mode: str) -> List[Tuple[str, str]]:
+    """Versions rendered right after analysis (EXPORTS_EAGER, default athlete:vertical).
+
+    Everything else is rendered the first time someone asks for it.
+    """
+    planned = planned_variants(display_mode)
+    raw = os.getenv("EXPORTS_EAGER", "athlete:vertical").strip().lower()
+    if raw == "all":
+        return planned
+    wanted = {_parse_variant(item.strip()) for item in raw.split(",")}
+    return [variant for variant in planned if variant in wanted]
+
+
+def source_retention_days() -> int:
+    try:
+        return max(1, int(os.getenv("EXPORT_SOURCE_RETENTION_DAYS", "30")))
+    except ValueError:
+        return 30
+
+
+def _portable_manifest(manifest: Dict[str, Any]) -> Dict[str, Any]:
+    """The manifest without machine-specific paths."""
+    return {
+        key: value
+        for key, value in manifest.items()
+        if key not in {"source_path", "overlay_path", "base", "manifest_path"}
+    }
+
+
+def retain_source(analysis_id: int, manifest: Dict[str, Any], source_s3_key: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """Keep the footage needed to render more versions later.
+
+    Stored in S3 (under export-sources/, expired by a bucket lifecycle rule)
+    when S3 is enabled; otherwise left on local disk (development).
+    """
+    from services.aws_s3 import S3Manager
+
+    expires_at = (datetime.utcnow() + timedelta(days=source_retention_days())).isoformat()
+    portable = _portable_manifest(manifest)
+    if not S3Manager.is_enabled():
+        return {
+            "storage": "local",
+            "source_path": manifest["source_path"],
+            "layer_path": manifest["overlay_path"],
+            "manifest": portable,
+            "expires_at": expires_at,
+        }
+
+    prefix = f"{SOURCE_PREFIX}/{analysis_id}"
+    extension = os.path.splitext(manifest["source_path"])[1] or ".mp4"
+    source_key = source_s3_key or S3Manager.upload_file(manifest["source_path"], f"{prefix}/source{extension}", "video/mp4")
+    layer_key = S3Manager.upload_file(manifest["overlay_path"], f"{prefix}/coach_layer.avi", "video/x-msvideo")
+    manifest_file = f"{manifest['base']}_portable.json"
+    try:
+        with open(manifest_file, "w", encoding="utf-8") as handle:
+            json.dump(portable, handle)
+        manifest_key = S3Manager.upload_file(manifest_file, f"{prefix}/manifest.json", "application/json")
+    finally:
+        _remove_quietly(manifest_file)
+    if not (source_key and layer_key and manifest_key):
+        logger.error("Could not retain export source for analysis %s; extra versions will be unavailable", analysis_id)
+        return None
+    return {
+        "storage": "s3",
+        "source_key": source_key,
+        "layer_key": layer_key,
+        "manifest_key": manifest_key,
+        "expires_at": expires_at,
+    }
+
+
+def source_entries(run: Any, field: str) -> List[str]:
+    """Retained-source S3 keys (field="s3_key") or local paths (field="path")."""
+    source = getattr(run, "export_source", None) or {}
+    if field == "s3_key":
+        names = ("source_key", "layer_key", "manifest_key")
+    else:
+        names = ("source_path", "layer_path")
+    return [source[name] for name in names if source.get(name)]
+
+
+def source_available(source: Optional[Dict[str, Any]]) -> bool:
+    if not source:
+        return False
+    try:
+        return datetime.fromisoformat(source["expires_at"]) > datetime.utcnow()
+    except (KeyError, ValueError, TypeError):
+        return False
+
+
+def _remove_path(path: Optional[str]) -> None:
+    if path and os.path.isdir(path):
+        shutil.rmtree(path, ignore_errors=True)
+    else:
+        _remove_quietly(path)
+
+
+def _touch(analysis_id: int) -> None:
+    _update_run(analysis_id, lambda run: None)  # _update_run stamps exports_updated_at
+
+
+def _finalize(analysis_id: int, variants, futures, cleanup_paths: List[str]) -> None:
+    # Heartbeat until every render finishes, so the watchdog knows they're alive.
+    pending = set(futures)
+    while pending:
+        _, pending = wait_for_futures(pending, timeout=HEARTBEAT_SECONDS)
+        if pending:
+            _touch(analysis_id)
     results = []
     for future in futures:
         try:
             results.append(future.result())
         except Exception:
             results.append(False)
+    finished = {_variant_key(mode, fmt) for mode, fmt in variants}
+    outcomes = {_variant_key(mode, fmt): ok for (mode, fmt), ok in zip(variants, results)}
+    remaining: List[str] = []
+    to_notify: Dict[str, List[int]] = {}
 
     def change(run):
-        run.exports_status = "ready" if any(results) else "failed"
+        # Requests that arrived while rendering stay queued for the next round.
+        remaining.extend(r for r in (run.export_requests or []) if r not in finished)
+        run.export_requests = remaining or None
+        requesters = dict(run.export_requesters or {})
+        for key in finished:
+            if requesters.get(key):
+                to_notify[key] = list(requesters.pop(key))
+        run.export_requesters = requesters or None
+        progress_values = {k: v for k, v in (run.export_progress or {}).items() if k not in finished}
+        run.export_progress = progress_values or None
+        run.export_attempts = None
+        if remaining:
+            run.exports_status = "requested"
+        else:
+            run.exports_status = "ready" if any(results) or not results else "failed"
 
     _update_run(analysis_id, change)
-    for path in [manifest["overlay_path"], manifest.get("manifest_path"), *cleanup_paths]:
-        _remove_quietly(path)
+    if to_notify:
+        from services.notifications import notify_version_result
+
+        for key, people in to_notify.items():
+            mode, fmt = _parse_variant(key) or (None, None)
+            if mode:
+                notify_version_result(analysis_id, mode, fmt, people, bool(outcomes.get(key)))
+    for path in cleanup_paths:
+        _remove_path(path)
     logger.info("Exports finished for analysis %s (%s of %s ready)", analysis_id, sum(results), len(results))
+    if remaining:
+        from services.job_queue import RUNNER_INLINE, runner_mode
+
+        if runner_mode() == RUNNER_INLINE:
+            process_export_requests(analysis_id)
 
 
-def submit_exports(analysis_id: int, manifest: Dict[str, Any], cleanup_paths: Optional[List[str]] = None) -> None:
-    """Queue every missing version on the worker pool; returns immediately.
-
-    ``cleanup_paths`` (e.g. the uploaded input video) are deleted once all
-    versions are finished, because rendering re-reads the source footage.
-    """
-    _update_run(analysis_id, lambda run: setattr(run, "exports_status", "processing"))
+def _launch(analysis_id: int, manifest: Dict[str, Any], variants, cleanup_paths: List[str]) -> None:
     pool = _get_pool()
-    futures = [
-        pool.submit(_run_variant, analysis_id, manifest, mode, fmt)
-        for mode, fmt in planned_variants(manifest["display_mode"])
-    ]
+    futures = [pool.submit(_run_variant, analysis_id, manifest, mode, fmt) for mode, fmt in variants]
     threading.Thread(
         target=_finalize,
-        args=(analysis_id, manifest, futures, list(cleanup_paths or [])),
+        args=(analysis_id, list(variants), futures, list(cleanup_paths)),
         name=f"video-export-finalize-{analysis_id}",
         daemon=True,
     ).start()
+
+
+def start_exports(
+    analysis_id: int,
+    manifest: Dict[str, Any],
+    cleanup_paths: Optional[List[str]] = None,
+    source_s3_key: Optional[str] = None,
+) -> None:
+    """After analysis: retain the source, render the eager versions now.
+
+    ``cleanup_paths`` (e.g. the local input video) are deleted when done,
+    unless the source had to be kept on local disk.
+    """
+    source = retain_source(analysis_id, manifest, source_s3_key)
+    eager = eager_variants(manifest["display_mode"])
+
+    def change(run):
+        run.export_source = source
+        run.export_requests = [_variant_key(m, f) for m, f in eager] or None
+        run.exports_status = "processing" if eager else "ready"
+
+    _update_run(analysis_id, change)
+    keep_local = bool(source and source.get("storage") == "local")
+    cleanup = [] if keep_local else [manifest["overlay_path"], *(cleanup_paths or [])]
+    cleanup.append(manifest.get("manifest_path"))
+    if eager:
+        _launch(analysis_id, manifest, eager, cleanup)
+    else:
+        for path in cleanup:
+            _remove_path(path)
+
+
+def submit_exports(analysis_id: int, manifest: Dict[str, Any], cleanup_paths: Optional[List[str]] = None) -> None:
+    """Render every missing version now (used when on-demand is not wanted)."""
+
+    def change(run):
+        run.export_requests = [_variant_key(m, f) for m, f in planned_variants(manifest["display_mode"])]
+        run.exports_status = "processing"
+
+    _update_run(analysis_id, change)
+    _launch(
+        analysis_id,
+        manifest,
+        planned_variants(manifest["display_mode"]),
+        [manifest["overlay_path"], manifest.get("manifest_path"), *(cleanup_paths or [])],
+    )
+
+
+def request_variant(analysis_id: int, mode: str, fmt: str, requester_id: Optional[int] = None) -> None:
+    """Ask for one version; the worker (or this process when inline) renders it."""
+    key = _variant_key(mode, fmt)
+
+    def change(run):
+        requests = list(run.export_requests or [])
+        if key not in requests:
+            requests.append(key)
+        run.export_requests = requests
+        if requester_id is not None:
+            requesters = {k: list(v) for k, v in (run.export_requesters or {}).items()}
+            people = requesters.setdefault(key, [])
+            if requester_id not in people:
+                people.append(requester_id)
+            run.export_requesters = requesters
+        if run.exports_status != "processing":
+            run.exports_status = "requested"
+
+    _update_run(analysis_id, change)
+    from services.job_queue import RUNNER_INLINE, runner_mode
+
+    if runner_mode() == RUNNER_INLINE:
+        threading.Thread(
+            target=process_export_requests,
+            args=(analysis_id,),
+            name=f"video-export-request-{analysis_id}",
+            daemon=True,
+        ).start()
+
+
+def _claim_requests(analysis_id: int) -> bool:
+    from sqlalchemy import text as sql_text
+
+    from database import SessionLocal, close_session_quietly
+
+    db = SessionLocal()
+    try:
+        claimed = db.execute(
+            sql_text(
+                "UPDATE video_analysis SET exports_status = 'processing', exports_updated_at = :now "
+                "WHERE id = :id AND exports_status = 'requested'"
+            ),
+            {"id": analysis_id, "now": datetime.utcnow()},
+        ).rowcount
+        db.commit()
+        return claimed == 1
+    finally:
+        close_session_quietly(db)
+
+
+def _materialise_source(analysis_id: int, source: Dict[str, Any]) -> Tuple[Dict[str, Any], List[str]]:
+    """Return a runnable manifest plus the temporary paths to delete afterwards."""
+    if source.get("storage") == "local":
+        manifest = dict(source["manifest"])
+        manifest.update({
+            "source_path": source["source_path"],
+            "overlay_path": source["layer_path"],
+            "base": os.path.splitext(source["source_path"])[0] + f"_ondemand_{analysis_id}",
+        })
+        if not (os.path.exists(manifest["source_path"]) and os.path.exists(manifest["overlay_path"])):
+            raise RuntimeError("retained source files are missing")
+        return manifest, []
+
+    from services.aws_s3 import AWS_S3_BUCKET, S3Manager
+
+    work_dir = os.path.abspath(os.path.join("temp_videos", f"export_{analysis_id}_{uuid.uuid4().hex[:8]}"))
+    os.makedirs(work_dir, exist_ok=True)
+    try:
+        paths = {
+            "manifest": os.path.join(work_dir, "manifest.json"),
+            "source": os.path.join(work_dir, "source" + (os.path.splitext(source["source_key"])[1] or ".mp4")),
+            "layer": os.path.join(work_dir, "coach_layer.avi"),
+        }
+        for name, key in (("manifest", "manifest_key"), ("source", "source_key"), ("layer", "layer_key")):
+            if not S3Manager.download_file(AWS_S3_BUCKET, source[key], paths[name]):
+                raise RuntimeError(f"could not download {name} from S3")
+        with open(paths["manifest"], encoding="utf-8") as handle:
+            manifest = json.load(handle)
+        manifest.update({
+            "source_path": paths["source"],
+            "overlay_path": paths["layer"],
+            "base": os.path.join(work_dir, f"run_{analysis_id}"),
+        })
+        return manifest, [work_dir]
+    except Exception:
+        _remove_path(work_dir)
+        raise
+
+
+def process_export_requests(analysis_id: int) -> bool:
+    """Render a run's requested versions. Safe to call from several places."""
+    if not _claim_requests(analysis_id):
+        return False
+
+    from database import SessionLocal, close_session_quietly
+    from models.video_analysis import VideoAnalysis
+
+    db = SessionLocal()
+    try:
+        run = db.query(VideoAnalysis).filter(VideoAnalysis.id == analysis_id).first()
+        source = dict(run.export_source or {}) if run else {}
+        ready = run.available_downloads if run else {}
+        wanted = []
+        for value in (run.export_requests or []) if run else []:
+            variant = _parse_variant(value)
+            if variant and variant[1] not in ready.get(variant[0], []) and variant not in wanted:
+                wanted.append(variant)
+    finally:
+        close_session_quietly(db)
+
+    try:
+        if not wanted or not source_available(source):
+            raise RuntimeError("nothing to render or source expired")
+        manifest, temp_paths = _materialise_source(analysis_id, source)
+    except Exception as exc:
+        logger.warning("On-demand export for analysis %s skipped: %s", analysis_id, exc)
+
+        def clear(run):
+            run.export_requests = None
+            run.exports_status = "ready"
+
+        _update_run(analysis_id, clear)
+        return False
+
+    _launch(analysis_id, manifest, wanted, temp_paths)
+    return True
+
+
+def recover_stalled_exports() -> int:
+    """Requeue renders whose process died (no heartbeat for STALL_AFTER).
+
+    After MAX_RENDER_ATTEMPTS the versions are given up on and whoever asked
+    is told they could not be made. Returns how many runs were handled.
+    """
+    from database import SessionLocal, close_session_quietly
+    from models.video_analysis import VideoAnalysis
+
+    cutoff = datetime.utcnow() - STALL_AFTER
+    db = SessionLocal()
+    try:
+        stalled = [
+            row.id
+            for row in db.query(VideoAnalysis.id).filter(
+                VideoAnalysis.exports_status == "processing",
+                VideoAnalysis.exports_updated_at < cutoff,
+            )
+        ]
+    finally:
+        close_session_quietly(db)
+
+    handled = 0
+    for analysis_id in stalled:
+        given_up: Dict[str, List[int]] = {}
+        retried = {"value": False}
+
+        def change(run):
+            # Re-check under the lock: a heartbeat may have arrived meanwhile.
+            if run.exports_status != "processing" or (run.exports_updated_at and run.exports_updated_at >= cutoff):
+                return
+            attempts = (run.export_attempts or 0) + 1
+            run.export_progress = None
+            if attempts < MAX_RENDER_ATTEMPTS and run.export_requests:
+                run.export_attempts = attempts
+                run.exports_status = "requested"
+                retried["value"] = True
+            else:
+                given_up.update({k: list(v) for k, v in (run.export_requesters or {}).items()})
+                run.export_requests = None
+                run.export_requesters = None
+                run.export_attempts = None
+                run.exports_status = "failed"
+
+        _update_run(analysis_id, change)
+        if retried["value"]:
+            handled += 1
+            logger.warning("Requeued stalled download versions for analysis %s", analysis_id)
+            from services.job_queue import RUNNER_INLINE, runner_mode
+
+            if runner_mode() == RUNNER_INLINE:
+                threading.Thread(
+                    target=process_export_requests,
+                    args=(analysis_id,),
+                    name=f"video-export-request-{analysis_id}",
+                    daemon=True,
+                ).start()
+        elif given_up:
+            handled += 1
+            logger.error("Gave up on download versions for analysis %s after repeated stalls", analysis_id)
+            from services.notifications import notify_version_result
+
+            for key, people in given_up.items():
+                variant = _parse_variant(key)
+                if variant:
+                    notify_version_result(analysis_id, variant[0], variant[1], people, ok=False)
+    return handled
+
+
+_watchdog_started = False
+
+
+def start_export_watchdog(interval_seconds: int = 60) -> None:
+    """Background check for stalled renders (API process in inline mode)."""
+    global _watchdog_started
+    if _watchdog_started:
+        return
+    _watchdog_started = True
+
+    def loop():
+        import time
+
+        time.sleep(5)  # let start-up finish
+        while True:
+            try:
+                recover_stalled_exports()
+            except Exception as exc:
+                logger.warning("Export watchdog check failed: %s", exc)
+            time.sleep(interval_seconds)
+
+    threading.Thread(target=loop, name="export-watchdog", daemon=True).start()
+
+
+def claim_pending_requests(limit: int = 3) -> int:
+    """Worker hook: start rendering runs whose versions were requested."""
+    from database import SessionLocal, close_session_quietly
+    from models.video_analysis import VideoAnalysis
+
+    db = SessionLocal()
+    try:
+        ids = [
+            row.id
+            for row in db.query(VideoAnalysis.id)
+            .filter(VideoAnalysis.exports_status == "requested")
+            .order_by(VideoAnalysis.exports_updated_at.asc().nullsfirst())
+            .limit(limit)
+        ]
+    finally:
+        close_session_quietly(db)
+    return sum(1 for analysis_id in ids if _source_reachable(analysis_id) and process_export_requests(analysis_id))
+
+
+def _source_reachable(analysis_id: int) -> bool:
+    """Skip runs whose retained footage is on another machine's disk."""
+    from database import SessionLocal, close_session_quietly
+    from models.video_analysis import VideoAnalysis
+
+    db = SessionLocal()
+    try:
+        run = db.query(VideoAnalysis).filter(VideoAnalysis.id == analysis_id).first()
+        source = (run.export_source or {}) if run else {}
+    finally:
+        close_session_quietly(db)
+    if source.get("storage") == "local":
+        return os.path.exists(source.get("source_path") or "")
+    return True
 
 
 def export_entries(run: Any, field: str) -> List[str]:
@@ -642,7 +1128,7 @@ def export_entries(run: Any, field: str) -> List[str]:
 
 
 def is_pending(status: Optional[str], updated_at: Optional[datetime]) -> bool:
-    if status != "processing":
+    if status not in {"processing", "requested"}:
         return False
     return updated_at is None or datetime.utcnow() - updated_at < PENDING_TIMEOUT
 

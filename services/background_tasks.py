@@ -8,8 +8,9 @@ from sqlalchemy.exc import OperationalError
 
 from database import SessionLocal
 from services.new_analysis import analyze_video
-from services.video_exports import submit_exports
-from services.aws_s3 import S3Manager, upload_analysis_files
+from services.video_exports import start_exports
+from services.notifications import notify_run_failed, notify_run_ready
+from services.aws_s3 import AWS_S3_BUCKET, S3Manager, upload_analysis_files
 import crud.person as person_crud
 import crud.job as job_crud
 from models.video_analysis import VideoAnalysis
@@ -274,6 +275,7 @@ def _mark_job_failed(job_id: str, error: Exception) -> None:
 
     try:
         _run_db_operation(operation, f"Mark job {job_id} failed")
+        notify_run_failed(job_id)
     except Exception as status_error:
         logger.error(
             "Could not mark job %s as failed after fresh-session retries: %s",
@@ -292,6 +294,7 @@ def _run_pipeline_after_download(
     user_name: Optional[str] = None,
     attempt_number: Optional[int] = None,
     rotation_override: Optional[int] = None,
+    source_s3_key: Optional[str] = None,
 ):
     """Core analysis, S3 upload, and DB commit pipeline."""
     logger.info("Starting analysis for job %s", job_id)
@@ -375,23 +378,25 @@ def _run_pipeline_after_download(
         analysis_values,
         timeline_values=timeline_values,
     )
+    notify_run_ready(analysis_id)
     logger.info(
         "Job %s: Completed successfully as analysis %s",
         job_id,
         analysis_id,
     )
 
-    # Render the other download versions on the export worker pool. They
-    # re-read the input video, so the export finalizer deletes it instead.
+    # Keep the footage for on-demand versions and render the eager ones on
+    # the export pool. They re-read the input video, so the export
+    # finalizer deletes it instead of this function.
     manifest = results.get("export_manifest")
     exports_queued = False
     if manifest:
         try:
-            submit_exports(analysis_id, manifest, cleanup_paths=[file_path])
+            start_exports(analysis_id, manifest, cleanup_paths=[file_path], source_s3_key=source_s3_key)
             exports_queued = True
-            logger.info("Job %s: Download versions queued for background rendering", job_id)
+            logger.info("Job %s: Download versions set up", job_id)
         except Exception as exc:
-            logger.error("Job %s: Could not queue download versions: %s", job_id, exc)
+            logger.error("Job %s: Could not set up download versions: %s", job_id, exc)
 
     # Clean up local disk files to prevent server disk from filling up
     try:
@@ -467,6 +472,10 @@ def process_google_drive_analysis_background(
                 destination_path=file_path,
                 oauth_token=oauth_token,
             )
+            # The Google token is not needed again; do not keep it stored.
+            from services.job_queue import scrub_payload
+
+            scrub_payload(job_id, "oauth_token")
             update_job_progress(job_id, 10)
 
             _run_pipeline_after_download(
@@ -478,6 +487,43 @@ def process_google_drive_analysis_background(
                 user_name=user_name,
                 attempt_number=attempt_number,
                 rotation_override=rotation_override,
+            )
+        except Exception as exc:
+            logger.error("Job %s failed: %s", job_id, exc, exc_info=True)
+            _mark_job_failed(job_id, exc)
+
+
+def process_s3_upload_background(
+    job_id: str,
+    s3_key: str,
+    file_path: str,
+    user_id: int,
+    display_mode: str = "coach",
+    report: bool = False,
+    user_name: Optional[str] = None,
+    attempt_number: Optional[int] = None,
+    rotation_override: Optional[int] = None,
+):
+    """A video the browser uploaded straight to S3: fetch it, then analyse."""
+    logger.info("Job %s: Waiting in queue for runner slot...", job_id)
+    with _analysis_lock:
+        try:
+            update_job_progress(job_id, 3)
+            os.makedirs(os.path.dirname(file_path), exist_ok=True)
+            if not S3Manager.download_file(AWS_S3_BUCKET, s3_key, file_path):
+                raise RuntimeError("The uploaded video could not be read from storage")
+            update_job_progress(job_id, 10)
+            _run_pipeline_after_download(
+                job_id=job_id,
+                file_path=file_path,
+                user_id=user_id,
+                display_mode=display_mode,
+                report=report,
+                user_name=user_name,
+                attempt_number=attempt_number,
+                rotation_override=rotation_override,
+                # Reused as the retained source; no second upload needed.
+                source_s3_key=s3_key,
             )
         except Exception as exc:
             logger.error("Job %s failed: %s", job_id, exc, exc_info=True)

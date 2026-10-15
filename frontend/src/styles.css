@@ -5034,3 +5034,454 @@ select:focus {
     justify-content: center;
   }
 }
+
+/* On-demand download versions */
+.download-option.is-preparable small {
+  color: var(--text);
+}
+
+.download-option-badge {
+  margin-left: auto;
+  padding: 3px 8px;
+  color: var(--accent);
+  background: var(--cyan-bg);
+  border: 1px solid var(--cyan-border);
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.mini-spinner {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  margin-right: 6px;
+  vertical-align: -1px;
+  border: 1.5px solid rgba(245, 167, 66, 0.3);
+  border-top-color: var(--orange);
+  border-radius: 50%;
+  animation: coach-note-spin 0.8s linear infinite;
+}
+
+
+/* Download progress */
+.action-download-btn[data-downloading="true"] {
+  position: relative;
+  overflow: hidden;
+  color: var(--accent);
+  border-color: var(--cyan-border);
+}
+
+.action-download-btn[data-downloading="true"]::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: var(--download-progress, 0%);
+  background: var(--accent-glow);
+  transition: width 200ms ease;
+}
+
+.action-download-btn[data-downloading="true"] > * {
+  position: relative;
+  font-variant-numeric: tabular-nums;
+}
+
+.download-progress {
+  margin: 8px 4px 4px;
+  padding: 10px 10px 8px;
+  background: var(--inset);
+  border: 1px solid var(--border-soft);
+  border-radius: 9px;
+}
+
+.download-progress-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.download-progress-head button {
+  padding: 2px 6px;
+  color: var(--muted);
+  background: transparent;
+  border: 0;
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.download-progress-head button:hover {
+  color: var(--red);
+}
+
+.download-progress-track {
+  height: 6px;
+  overflow: hidden;
+  background: var(--border-soft);
+  border-radius: 999px;
+}
+
+.download-progress-track > div {
+  height: 100%;
+  background: var(--accent);
+  border-radius: inherit;
+  transition: width 200ms ease;
+}
+
+.download-progress-track.is-indeterminate > div {
+  animation: download-indeterminate 1.2s ease-in-out infinite;
+}
+
+@keyframes download-indeterminate {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(300%); }
+}
+
+.download-progress small {
+  display: block;
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .download-progress-track.is-indeterminate > div {
+    animation: none;
+  }
+}
+
+/* ── Notification bell ─────────────────────────────────────────────── */
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
+
+.notification-bell {
+  position: relative;
+}
+
+.bell-trigger {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  color: var(--text);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  cursor: pointer;
+  transition: border-color 150ms ease, background 150ms ease;
+}
+
+.bell-trigger:hover,
+.bell-trigger[aria-expanded="true"] {
+  border-color: var(--border-strong);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.bell-badge {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  color: #fff;
+  background: #ef4444;
+  border: 2px solid var(--card);
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 800;
+  line-height: 14px;
+  text-align: center;
+}
+
+.bell-busy-dot {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 8px;
+  height: 8px;
+  background: var(--accent);
+  border-radius: 50%;
+  animation: bell-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes bell-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(139, 192, 213, 0.6); }
+  50% { box-shadow: 0 0 0 5px rgba(139, 192, 213, 0); }
+}
+
+.notification-panel {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 60;
+  width: 370px;
+  max-width: calc(100vw - 32px);
+  background: var(--card);
+  border: 1px solid var(--border-strong);
+  border-radius: 14px;
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.5);
+  overflow: hidden;
+}
+
+.notification-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.notification-panel-head strong {
+  font-family: var(--font-heading);
+  font-size: 15px;
+}
+
+.notification-panel-head button {
+  color: var(--muted);
+  background: transparent;
+  border: 0;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.notification-panel-head button:hover {
+  color: var(--accent);
+}
+
+.notification-list {
+  max-height: min(440px, 70vh);
+  overflow-y: auto;
+}
+
+.notification-item {
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 13px 16px;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.notification-item:last-child {
+  border-bottom: 0;
+}
+
+.notification-item.is-unread {
+  background: rgba(139, 192, 213, 0.06);
+}
+
+.notification-item.is-unread::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 3px;
+  background: var(--accent);
+}
+
+.notification-emoji {
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  width: 38px;
+  height: 38px;
+  font-size: 18px;
+  background: var(--inset);
+  border: 1px solid var(--border);
+  border-radius: 50%;
+}
+
+.notification-emoji.is-done {
+  color: var(--green);
+  background: var(--green-bg);
+  border-color: var(--green-border);
+  font-size: 16px;
+  font-weight: 800;
+}
+
+.notification-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+
+.notification-text strong,
+.notification-title-link {
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.35;
+}
+
+.notification-title-link {
+  padding: 0;
+  background: transparent;
+  border: 0;
+  text-align: left;
+  cursor: pointer;
+}
+
+.notification-title-link:hover {
+  color: var(--accent);
+}
+
+.notification-text span {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.notification-text small {
+  margin-top: 2px;
+  color: #6b6b6b;
+  font-size: 11px;
+}
+
+.notification-error {
+  color: var(--red) !important;
+}
+
+.notification-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.notification-download {
+  height: 28px;
+  padding: 0 10px;
+  color: var(--accent-text);
+  background: var(--accent);
+  border: 0;
+  border-radius: 7px;
+  font-size: 11px;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.notification-download:hover {
+  background: var(--accent-hover);
+}
+
+.notification-dismiss {
+  width: 26px;
+  height: 26px;
+  color: var(--muted);
+  background: transparent;
+  border: 0;
+  border-radius: 6px;
+  font-size: 16px;
+  cursor: pointer;
+}
+
+.notification-dismiss:hover {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.notification-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 32px 20px;
+  text-align: center;
+}
+
+.notification-empty span {
+  font-size: 26px;
+}
+
+.notification-empty strong {
+  font-size: 14px;
+}
+
+.notification-empty small {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.notification-foot {
+  margin: 0;
+  padding: 10px 16px;
+  color: var(--muted);
+  background: var(--inset);
+  border-top: 1px solid var(--border-soft);
+  font-size: 11px;
+}
+
+/* Circular progress */
+.progress-ring {
+  position: relative;
+  display: inline-grid;
+  place-items: center;
+  flex-shrink: 0;
+}
+
+.progress-ring svg {
+  transform: rotate(-90deg);
+}
+
+.progress-ring-track {
+  fill: none;
+  stroke: var(--border);
+}
+
+.progress-ring-value {
+  fill: none;
+  stroke: var(--accent);
+  stroke-linecap: round;
+  transition: stroke-dashoffset 300ms ease;
+}
+
+.progress-ring.is-indeterminate svg {
+  animation: ring-spin 1s linear infinite;
+}
+
+@keyframes ring-spin {
+  from { transform: rotate(-90deg); }
+  to { transform: rotate(270deg); }
+}
+
+.progress-ring-label {
+  position: absolute;
+  color: var(--text);
+  font-size: 10px;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bell-busy-dot,
+  .progress-ring.is-indeterminate svg {
+    animation: none;
+  }
+}
+
+@media (max-width: 520px) {
+  .notification-panel {
+    position: fixed;
+    top: 72px;
+    left: 16px;
+    right: 16px;
+    width: auto;
+    max-width: none;
+  }
+}
+

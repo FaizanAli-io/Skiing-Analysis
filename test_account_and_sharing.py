@@ -12,6 +12,9 @@ from unittest import mock
 
 os.environ.setdefault("JWT_SECRET", "test-secret")
 os.environ["AI_COACH_NOTES_ENABLED"] = "false"
+# Never send real email from tests (set before .env is loaded; dotenv won't override).
+os.environ["SMTP_USERNAME"] = ""
+os.environ["SMTP_PASSWORD"] = ""
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -35,6 +38,20 @@ engine = create_engine(
     poolclass=StaticPool,
 )
 TestingSession = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+
+def wait_for_export_threads(timeout=30):
+    """Background export threads must not outlive a test (run IDs repeat)."""
+    import threading
+    import time
+
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        # Per-job finalize/request threads; the pool's own idle threads live on.
+        busy = [t for t in threading.enumerate() if t.name.startswith(("video-export-finalize", "video-export-request"))]
+        if not busy:
+            return
+        time.sleep(0.05)
 
 
 def override_get_db():
@@ -97,6 +114,7 @@ class _Fixture(unittest.TestCase):
         db.close()
 
     def tearDown(self):
+        wait_for_export_threads()
         self.session_patch.stop()
         self.tmpdir.cleanup()
 
@@ -249,7 +267,7 @@ class AccountAndSharingTests(_Fixture):
 
         db = TestingSession()
         db.query(VideoAnalysis).filter(VideoAnalysis.id == self.ids["run"]).update(
-            {"exports_status": "processing", "exports_updated_at": dt.utcnow()}
+            {"exports_status": "processing", "exports_updated_at": dt.utcnow(), "export_requests": ["coach:square"]}
         )
         db.commit()
         db.close()
@@ -336,7 +354,7 @@ class ExportPoolTests(_Fixture):
             with open(path, "wb") as handle:
                 handle.write(b"x")
 
-        def fake_render(manifest, mode, fmt):
+        def fake_render(manifest, mode, fmt, progress=None):
             path = os.path.join(self.tmpdir.name, f"{mode}_{fmt}.mp4")
             with open(path, "wb") as handle:
                 handle.write(b"video")
@@ -489,6 +507,33 @@ class ClientRunNumberingTests(_Fixture):
         admin = self.headers(self.login("admin@test.com", "admin-pass-1"))
         admin_trends = TestClient(local_app).get(f"/api/admin/users/{self.ids['alice']}/trends", headers=admin).json()
         self.assertEqual(admin_trends["time_series"]["runs"][:2], [49, 50])
+
+
+class ApiCompressionTests(unittest.TestCase):
+    def test_api_json_is_gzipped_but_downloads_are_not(self):
+        from fastapi.responses import Response
+        from services.api_gzip import ApiGZipMiddleware
+
+        local_app = FastAPI()
+        local_app.add_middleware(ApiGZipMiddleware, minimum_size=1000)
+
+        @local_app.get("/api/rows")
+        def rows():
+            return [{"name": "Alice", "score": i} for i in range(200)]
+
+        @local_app.get("/api/videos/1/download")
+        def download():
+            return Response(b"x" * 5000, media_type="video/mp4")
+
+        @local_app.get("/outputs/run.mp4")
+        def static_file():
+            return Response(b"x" * 5000, media_type="video/mp4")
+
+        client = TestClient(local_app)
+        gzip_header = {"Accept-Encoding": "gzip"}
+        self.assertEqual(client.get("/api/rows", headers=gzip_header).headers.get("content-encoding"), "gzip")
+        self.assertIsNone(client.get("/api/videos/1/download", headers=gzip_header).headers.get("content-encoding"))
+        self.assertIsNone(client.get("/outputs/run.mp4", headers=gzip_header).headers.get("content-encoding"))
 
 
 class ProgressLineTests(unittest.TestCase):

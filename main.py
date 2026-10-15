@@ -1,5 +1,8 @@
 from fastapi import FastAPI, UploadFile, File, Form, Depends, APIRouter, HTTPException, BackgroundTasks, Request
 from fastapi.middleware.cors import CORSMiddleware
+from services.api_gzip import ApiGZipMiddleware
+from services.bootstrap import check_schema_on_startup
+from services import job_queue
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
 import shutil
@@ -27,7 +30,7 @@ import crud.video_analysis as video_crud
 import crud.job as job_crud
 from services.new_analysis import analyze_video
 from services.background_tasks import process_video_analysis_background
-from routes import admin_portal, app_routes, auth, client_portal, person, users, video_analysis, jobs
+from routes import admin_portal, app_routes, auth, client_portal, person, users, video_analysis, jobs, uploads, notifications
 import threading
 from services.file_watcher import start_watching
 from typing import Optional, List
@@ -35,40 +38,16 @@ from services.auth import hash_password, require_admin
 from services.aws_s3 import S3Manager, upload_analysis_files
 
 
-# Create DB tables
-Base.metadata.create_all(bind=engine)
-ensure_database_schema()
+# Database set-up runs via `python migrate.py`; starting the API only checks
+# that the schema is current (and migrates if it changed, see bootstrap).
+check_schema_on_startup()
 
+# Inline mode renders download versions in this process; requeue any that
+# were cut off by a restart. (In worker mode the worker does this.)
+if job_queue.runner_mode() == job_queue.RUNNER_INLINE:
+    from services.video_exports import start_export_watchdog
 
-def ensure_default_admin():
-    admin_email = os.getenv("DEFAULT_ADMIN_EMAIL")
-    admin_password = os.getenv("DEFAULT_ADMIN_PASSWORD")
-    if not admin_email or not admin_password:
-        return
-
-    db = SessionLocal()
-    try:
-        email = admin_email.strip().lower()
-        existing = db.query(Person).filter(Person.email == email).first()
-        if existing:
-            if existing.role != "admin":
-                existing.role = "admin"
-                db.commit()
-            return
-        admin = Person(
-            name=os.getenv("DEFAULT_ADMIN_NAME", "Bluerun Admin"),
-            email=email,
-            password_hash=hash_password(admin_password),
-            role="admin",
-            is_active=True,
-        )
-        db.add(admin)
-        db.commit()
-    finally:
-        db.close()
-
-
-ensure_default_admin()
+    start_export_watchdog()
 
 # FastAPI app instance
 app = FastAPI(
@@ -77,6 +56,8 @@ app = FastAPI(
     version="1.0.0"
 )
 
+
+app.add_middleware(ApiGZipMiddleware, minimum_size=1000)
 
 # CORS middleware
 app.add_middleware(
@@ -88,6 +69,7 @@ app.add_middleware(
 )
 
 os.makedirs("outputs", exist_ok=True)
+from services.job_queue import TEMP_VIDEO_DIR, queue_job as _queue_job, safe_upload_name as _safe_upload_name
 app.mount("/outputs", StaticFiles(directory="outputs"), name="outputs")
 
 # Include route modules with /api prefix
@@ -99,6 +81,8 @@ app.include_router(admin_portal.router, prefix="/api")
 app.include_router(client_portal.router, prefix="/api")
 app.include_router(app_routes.router, prefix="/api")
 app.include_router(jobs.router, prefix="/api")
+app.include_router(uploads.router, prefix="/api")
+app.include_router(notifications.router, prefix="/api")
 
 
 # @app.on_event("startup")
@@ -226,39 +210,31 @@ async def analyze_ski_video_premium_overlay(
     # Generate unique job ID
     job_id = str(uuid.uuid4())
     
-    # Save uploaded file
-    os.makedirs("temp_videos", exist_ok=True)
-    file_location = f"temp_videos/{job_id}_{file.filename}"
+    # Save uploaded file (absolute path so the worker finds it too)
+    os.makedirs(TEMP_VIDEO_DIR, exist_ok=True)
+    file_location = os.path.join(TEMP_VIDEO_DIR, f"{job_id}_{_safe_upload_name(file.filename, 'upload.mp4')}")
     
     with open(file_location, "wb") as f:
         shutil.copyfileobj(file.file, f)
     file.file.close()
     
-    # Create job record in database
-    write_db = SessionLocal()
-    try:
-        job_crud.create_job(
-            write_db,
-            job_id=job_id,
-            person_id=user_id,
-            file_name=file.filename,
-            display_mode=display_mode,
-            generate_report=report
-        )
-    finally:
-        close_session_quietly(write_db)
-    
-    # Add background task
-    background_tasks.add_task(
-        process_video_analysis_background,
-        job_id=job_id,
-        file_path=file_location,
-        user_id=user_id,
-        display_mode=display_mode,
-        report=report,
-        user_name=user_name,
-        attempt_number=attempt_number,
-        rotation_override=rotation_override,
+    _queue_job(
+        background_tasks,
+        job_id,
+        "upload",
+        user_id,
+        file.filename or os.path.basename(file_location),
+        display_mode,
+        report,
+        {
+            "file_path": file_location,
+            "user_id": user_id,
+            "display_mode": display_mode,
+            "report": report,
+            "user_name": user_name,
+            "attempt_number": attempt_number,
+            "rotation_override": rotation_override,
+        },
     )
     
     return {
@@ -361,35 +337,29 @@ async def analyze_ski_video_google_drive(
     clean_name = re.sub(r'[^\w\-_\.]', '_', actual_filename)
     if not clean_name.lower().endswith(('.mp4', '.mov', '.avi', '.mkv')):
         clean_name += ".mp4"
-    file_location = f"temp_videos/{job_id}_{clean_name}"
+    os.makedirs(TEMP_VIDEO_DIR, exist_ok=True)
+    file_location = os.path.join(TEMP_VIDEO_DIR, f"{job_id}_{clean_name}")
 
-    # Create job record in database
-    write_db = SessionLocal()
-    try:
-        job_crud.create_job(
-            write_db,
-            job_id=job_id,
-            person_id=user_id,
-            file_name=actual_filename,
-            display_mode=display_mode,
-            generate_report=report
-        )
-    finally:
-        close_session_quietly(write_db)
-
-    # Add background task for sequential queue
-    background_tasks.add_task(
-        process_google_drive_analysis_background,
-        job_id=job_id,
-        drive_file_id=resolved_file_id,
-        file_path=file_location,
-        user_id=user_id,
-        display_mode=display_mode,
-        report=report,
-        user_name=user_name,
-        attempt_number=attempt_number,
-        oauth_token=oauth_token,
-        rotation_override=rotation_override,
+    _queue_job(
+        background_tasks,
+        job_id,
+        "drive",
+        user_id,
+        actual_filename,
+        display_mode,
+        report,
+        {
+            "drive_file_id": resolved_file_id,
+            "file_path": file_location,
+            "user_id": user_id,
+            "display_mode": display_mode,
+            "report": report,
+            "user_name": user_name,
+            "attempt_number": attempt_number,
+            # Removed from the stored job as soon as the download is done.
+            "oauth_token": oauth_token,
+            "rotation_override": rotation_override,
+        },
     )
 
     return {

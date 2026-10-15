@@ -35,6 +35,29 @@ else:
     logger.warning("AWS credentials not found. S3 storage disabled. Files will be stored locally.")
 
 
+_upload_client = None
+
+
+def _upload_signing_client():
+    """SigV4 client used only to sign browser uploads.
+
+    Kept separate so download links keep the signing style the existing
+    report/video URLs rely on.
+    """
+    global _upload_client
+    if _upload_client is None:
+        from botocore.config import Config
+
+        _upload_client = boto3.client(
+            "s3",
+            aws_access_key_id=AWS_ACCESS_KEY_ID,
+            aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
+            region_name=AWS_REGION,
+            config=Config(signature_version="s3v4"),
+        )
+    return _upload_client
+
+
 class S3Manager:
     """Manages S3 uploads, downloads, and signed URLs"""
     
@@ -115,6 +138,53 @@ class S3Manager:
             logger.error(f"Failed to upload report to S3: {e}")
             return None
     
+    @staticmethod
+    def presign_upload(s3_key: str, content_type: str, max_bytes: int, expires_in: int = 3600) -> Optional[dict]:
+        """Signed browser form for one direct upload: fixed key, type and max size."""
+        if not S3Manager.is_enabled():
+            return None
+        try:
+            return _upload_signing_client().generate_presigned_post(
+                Bucket=AWS_S3_BUCKET,
+                Key=s3_key,
+                Fields={"Content-Type": content_type},
+                Conditions=[
+                    {"Content-Type": content_type},
+                    ["content-length-range", 1, int(max_bytes)],
+                ],
+                ExpiresIn=expires_in,
+            )
+        except ClientError as e:
+            logger.error(f"Failed to presign upload: {e}")
+            return None
+
+    @staticmethod
+    def object_size(s3_key: str) -> Optional[int]:
+        """Size in bytes of an existing object, or None if it does not exist."""
+        if not S3Manager.is_enabled():
+            return None
+        try:
+            return int(s3_client.head_object(Bucket=AWS_S3_BUCKET, Key=s3_key)["ContentLength"])
+        except ClientError:
+            return None
+
+    @staticmethod
+    def upload_file(local_path: str, s3_key: str, content_type: str = "application/octet-stream") -> Optional[str]:
+        """Upload any file to an exact key. Returns the key, or None on failure."""
+        if not S3Manager.is_enabled():
+            return None
+        try:
+            s3_client.upload_file(
+                local_path,
+                AWS_S3_BUCKET,
+                s3_key,
+                ExtraArgs={'ContentType': content_type, 'ServerSideEncryption': 'AES256'},
+            )
+            return s3_key
+        except ClientError as e:
+            logger.error(f"Failed to upload {local_path} to S3: {e}")
+            return None
+
     @staticmethod
     def upload_image(local_path: str, s3_key: Optional[str] = None) -> Optional[str]:
         """

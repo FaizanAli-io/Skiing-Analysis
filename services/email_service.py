@@ -82,3 +82,38 @@ def send_code_email(to_email: str, code: str, purpose: str, minutes_valid: int) 
   </div>
 </div>"""
     send_email(to_email, subject, text_body, html_body)
+
+
+def send_password_changed_email(to_email: str, name: str = "") -> None:
+    """Security notice after a password change or reset."""
+    greeting = f"Hi {name.split(' ')[0]}," if name else "Hi,"
+    intro = "The password for your Bluerun account was just changed."
+    outro = (
+        "If this was you, no action is needed. If you did not change it, reset your password "
+        "from the sign-in page straight away and let your coach know."
+    )
+    text_body = f"{greeting}\n\n{intro}\n\n{outro}\n\nBluerun"
+    html_body = f"""\
+<div style="font-family:Arial,Helvetica,sans-serif;background:#151515;padding:32px;color:#ffffff">
+  <div style="max-width:460px;margin:0 auto;background:#222222;border:1px solid #383838;border-radius:14px;padding:28px">
+    <p style="margin:0 0 6px;color:#8BC0D5;font-weight:700;letter-spacing:.08em;font-size:12px">BLUERUN</p>
+    <p style="margin:0 0 14px;font-size:15px">{escape(greeting)}</p>
+    <p style="margin:0 0 14px;font-size:15px;line-height:1.5">{escape(intro)}</p>
+    <p style="margin:0;color:#8c8c8c;font-size:13px;line-height:1.5">{escape(outro)}</p>
+  </div>
+</div>"""
+    send_email(to_email, "Your Bluerun password was changed", text_body, html_body)
+
+
+def send_in_background(function, *args) -> None:
+    """Fire-and-forget email so a slow mail server never delays the response."""
+    import threading
+
+    def run():
+        try:
+            function(*args)
+        except Exception as exc:
+            logger.warning("Background email failed: %s", exc)
+
+    threading.Thread(target=run, name="email-send", daemon=True).start()
+

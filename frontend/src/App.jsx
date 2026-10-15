@@ -5,7 +5,12 @@ import RunAnalysisGraph from "./RunAnalysisGraph";
 import logoImg from "../../services/bluerun.png";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
-const DASHBOARD_REFRESH_MS = 5000;
+const DASHBOARD_REFRESH_MS = 30000;
+// The admin dashboard follows the light jobs list closely and reloads the
+// heavier runs/leaderboards only when a job finishes (or as a slow fallback).
+const JOBS_POLL_ACTIVE_MS = 3000;
+const JOBS_POLL_IDLE_MS = 15000;
+const ADMIN_ACTIVITY_FALLBACK_MS = 60000;
 const SCORE_METRICS = [
   ["blue_iq", "Blue IQ"],
   ["pressure", "Pressure"],
@@ -113,7 +118,8 @@ function rankClients(clients, query, limit = Infinity) {
     .map(({ client }) => client);
 }
 
-function useAutoRefresh(refresh, enabled = true) {
+// Re-runs `refresh` when the tab regains focus and every `intervalMs` while visible.
+function useAutoRefresh(refresh, enabled = true, intervalMs = DASHBOARD_REFRESH_MS) {
   const refreshRef = useRef(refresh);
 
   useEffect(() => {
@@ -140,7 +146,7 @@ function useAutoRefresh(refresh, enabled = true) {
     const refreshWhenVisible = () => {
       if (document.visibilityState === "visible") runRefresh();
     };
-    const timer = window.setInterval(runRefresh, DASHBOARD_REFRESH_MS);
+    const timer = window.setInterval(runRefresh, intervalMs);
 
     window.addEventListener("focus", runRefresh);
     document.addEventListener("visibilitychange", refreshWhenVisible);
@@ -150,7 +156,7 @@ function useAutoRefresh(refresh, enabled = true) {
       window.removeEventListener("focus", runRefresh);
       document.removeEventListener("visibilitychange", refreshWhenVisible);
     };
-  }, [enabled]);
+  }, [enabled, intervalMs]);
 }
 
 function Logo() {
@@ -396,7 +402,7 @@ function AuthForm({ type }) {
       }
       const expectedRole = isAdmin ? "admin" : "client";
       if (result.user.role !== expectedRole) {
-        throw new Error(isAdmin ? "This account is not an admin account." : "Please use the admin sign-in page for admin accounts.");
+        throw new Error(isAdmin ? "This account is not an admin account." : "This account can't sign in here.");
       }
       setToken(result.access_token, isAdmin ? "admin" : "client");
       routeTo(isAdmin ? "/admin" : "/dashboard");
@@ -472,9 +478,6 @@ function AuthForm({ type }) {
             <button onClick={() => routeTo(isSignup ? "/login" : "/signup")}>{isSignup ? "Sign in" : "Create account"}</button>
           </p>
         )}
-        <button className="ghost-link" onClick={() => routeTo(isAdmin ? "/login" : "/admin-login")}>
-          {isAdmin ? "Client sign in" : "Admin sign in"}
-        </button>
       </div>
     </AuthShell>
   );
@@ -652,6 +655,250 @@ function ChangePasswordModal({ tokenKind, onClose }) {
   );
 }
 
+function ProgressRing({ value, size = 38, stroke = 3.5, children }) {
+  const radius = (size - stroke) / 2;
+  const circumference = 2 * Math.PI * radius;
+  const known = Number.isFinite(value);
+  const offset = known ? circumference * (1 - Math.min(100, Math.max(0, value)) / 100) : circumference * 0.7;
+  return (
+    <span className={`progress-ring ${known ? "" : "is-indeterminate"}`} style={{ width: size, height: size }}>
+      <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} aria-hidden="true">
+        <circle cx={size / 2} cy={size / 2} r={radius} className="progress-ring-track" strokeWidth={stroke} />
+        <circle
+          cx={size / 2}
+          cy={size / 2}
+          r={radius}
+          className="progress-ring-value"
+          strokeWidth={stroke}
+          strokeDasharray={circumference}
+          strokeDashoffset={offset}
+        />
+      </svg>
+      <span className="progress-ring-label">{children ?? (known ? `${Math.round(value)}%` : "")}</span>
+    </span>
+  );
+}
+
+function timeAgo(value) {
+  if (!value) return "";
+  const text = String(value);
+  const date = new Date(/[zZ]|[+-]\d\d:?\d\d$/.test(text) ? text : `${text}Z`);
+  const seconds = Math.max(0, Math.round((Date.now() - date.getTime()) / 1000));
+  if (seconds < 60) return "just now";
+  if (seconds < 3600) return `${Math.floor(seconds / 60)} min ago`;
+  if (seconds < 86400) return `${Math.floor(seconds / 3600)} h ago`;
+  return `${Math.floor(seconds / 86400)} d ago`;
+}
+
+function NotificationBell({ tokenKind }) {
+  const isAdmin = tokenKind === "admin";
+  const [open, setOpen] = useState(false);
+  const [data, setData] = useState({ unread: 0, active_jobs: [], preparing_videos: [], items: [] });
+  const [downloads, setDownloads] = useState({}); // id -> { percent, done, error }
+  const ref = useRef(null);
+  const openRef = useRef(false);
+
+  async function load() {
+    try {
+      const result = await api("/notifications", { token: getToken(tokenKind) });
+      setData({ preparing_videos: [], ...result });
+    } catch {
+      // keep the last state; the next poll retries
+    }
+  }
+
+  const busy = data.active_jobs.length > 0
+    || data.preparing_videos.length > 0
+    || Object.values(downloads).some((d) => !d.done && !d.error);
+  useEffect(() => {
+    load();
+    const timer = window.setInterval(() => {
+      if (document.visibilityState !== "hidden") load();
+    }, busy ? 3000 : 20000);
+    const refreshNow = () => load();
+    window.addEventListener("bluerun:notifications-refresh", refreshNow);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener("bluerun:notifications-refresh", refreshNow);
+    };
+  }, [busy, tokenKind]);
+
+  // Closing the panel clears items that were already downloaded and seen.
+  async function closePanel() {
+    if (!openRef.current) return;
+    openRef.current = false;
+    setOpen(false);
+    const finished = data.items.filter((item) => item.downloaded || downloads[item.id]?.done);
+    if (!finished.length) return;
+    setData((current) => ({ ...current, items: current.items.filter((item) => !finished.some((f) => f.id === item.id)) }));
+    await Promise.all(finished.map((item) =>
+      api(`/notifications/${item.id}/dismiss`, { method: "POST", token: getToken(tokenKind) }).catch(() => {})
+    ));
+  }
+
+  function openPanel() {
+    openRef.current = true;
+    setOpen(true);
+    if (data.unread) {
+      setData((current) => ({ ...current, unread: 0, items: current.items.map((item) => ({ ...item, read: true })) }));
+      api("/notifications/read-all", { method: "POST", token: getToken(tokenKind) }).catch(() => {});
+    }
+  }
+
+  useEffect(() => {
+    if (!open) return undefined;
+    const onDown = (event) => {
+      if (ref.current && !ref.current.contains(event.target)) closePanel();
+    };
+    const onKey = (event) => event.key === "Escape" && closePanel();
+    document.addEventListener("mousedown", onDown);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [open, data, downloads]);
+
+  async function download(item) {
+    setDownloads((current) => ({ ...current, [item.id]: { percent: 0 } }));
+    try {
+      const isVersion = item.kind === "video_ready" && item.video_format;
+      await downloadAttemptVideo(item.analysis_id, isVersion ? item.video_mode : null, isVersion ? item.video_format : "original", tokenKind, {
+        onProgress: ({ received, total }) => setDownloads((current) => ({
+          ...current,
+          [item.id]: { percent: total ? Math.round((received / total) * 100) : null },
+        })),
+      });
+      setDownloads((current) => ({ ...current, [item.id]: { percent: 100, done: true } }));
+      api(`/notifications/${item.id}/downloaded`, { method: "POST", token: getToken(tokenKind) }).catch(() => {});
+    } catch (err) {
+      setDownloads((current) => ({ ...current, [item.id]: { error: err.message || "Download failed" } }));
+    }
+  }
+
+  async function dismiss(item) {
+    setData((current) => ({ ...current, items: current.items.filter((other) => other.id !== item.id) }));
+    api(`/notifications/${item.id}/dismiss`, { method: "POST", token: getToken(tokenKind) }).catch(() => {});
+  }
+
+  async function clearAll() {
+    setData((current) => ({ ...current, items: [], unread: 0 }));
+    api("/notifications/clear", { method: "POST", token: getToken(tokenKind) }).catch(() => {});
+  }
+
+  const activeDownload = Object.values(downloads).find((d) => !d.done && !d.error);
+  const badge = data.unread;
+
+  return (
+    <div className="notification-bell" ref={ref}>
+      <button
+        type="button"
+        className={`bell-trigger ${busy ? "is-busy" : ""}`}
+        aria-label={badge ? `Notifications, ${badge} new` : "Notifications"}
+        aria-haspopup="dialog"
+        aria-expanded={open}
+        onClick={() => (open ? closePanel() : openPanel())}
+      >
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9" />
+          <path d="M13.73 21a2 2 0 0 1-3.46 0" />
+        </svg>
+        {badge > 0 && <span className="bell-badge">{badge > 9 ? "9+" : badge}</span>}
+        {!badge && busy && <span className="bell-busy-dot" aria-hidden="true" />}
+      </button>
+
+      {open && (
+        <div className="notification-panel" role="dialog" aria-label="Notifications">
+          <div className="notification-panel-head">
+            <strong>Notifications</strong>
+            {data.items.length > 0 && <button type="button" onClick={clearAll}>Clear all</button>}
+          </div>
+
+          <div className="notification-list">
+            {data.active_jobs.map((job) => (
+              <div className="notification-item is-processing" key={job.job_id}>
+                <ProgressRing value={job.status === "pending" ? NaN : job.progress} />
+                <div className="notification-text">
+                  <strong>{job.status === "pending" ? "Waiting to start…" : "Analysing a run…"}</strong>
+                  <span>
+                    {isAdmin
+                      ? `${job.athlete_name || "Athlete"}${job.file_name ? ` · ${job.file_name}` : ""}`
+                      : "Your coach uploaded a new run. We'll let you know when it's ready."}
+                  </span>
+                </div>
+              </div>
+            ))}
+
+            {data.preparing_videos.map((video) => (
+              <div className="notification-item is-processing" key={`${video.analysis_id}-${video.mode}-${video.format}`}>
+                <ProgressRing value={video.progress || NaN} />
+                <div className="notification-text">
+                  <strong>Preparing your {video.label} video…</strong>
+                  <span>{video.progress ? `${video.progress}% done. ` : ""}We'll let you know here when it's ready to download.</span>
+                </div>
+              </div>
+            ))}
+
+            {data.items.map((item) => {
+              const state = downloads[item.id] || {};
+              const downloaded = item.downloaded || state.done;
+              const downloading = state.percent !== undefined && !state.done && !state.error;
+              return (
+                <div className={`notification-item ${item.read ? "" : "is-unread"}`} key={item.id}>
+                  {downloading ? (
+                    <ProgressRing value={state.percent ?? NaN} />
+                  ) : (
+                    <span className={`notification-emoji ${downloaded ? "is-done" : ""}`} aria-hidden="true">
+                      {downloaded ? "✓" : item.emoji || "🔔"}
+                    </span>
+                  )}
+                  <div className="notification-text">
+                    {isAdmin && item.athlete_id ? (
+                      <button type="button" className="notification-title-link" onClick={() => { closePanel(); routeTo(`/admin/athletes/${item.athlete_id}`); }}>
+                        {item.title}
+                      </button>
+                    ) : (
+                      <strong>{item.title}</strong>
+                    )}
+                    <span>
+                      {downloaded
+                        ? "Downloaded. This will clear when you close notifications."
+                        : downloading
+                          ? `Downloading… ${state.percent != null ? `${state.percent}%` : ""}`
+                          : item.body}
+                    </span>
+                    {state.error && <span className="notification-error">{state.error}</span>}
+                    <small>{timeAgo(item.created_at)}</small>
+                  </div>
+                  <div className="notification-actions">
+                    {item.analysis_id && !downloaded && !downloading && (item.kind === "run_ready" || item.kind === "video_ready") && (
+                      <button type="button" className="notification-download" onClick={() => download(item)}>
+                        {state.error ? "Retry" : "Download"}
+                      </button>
+                    )}
+                    {!downloading && (
+                      <button type="button" className="notification-dismiss" aria-label="Dismiss" onClick={() => dismiss(item)}>×</button>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+
+            {!data.active_jobs.length && !data.preparing_videos.length && !data.items.length && (
+              <div className="notification-empty">
+                <span aria-hidden="true">✨</span>
+                <strong>You're all caught up</strong>
+                <small>{isAdmin ? "Finished runs and uploads will show up here." : "New runs from your coach will show up here."}</small>
+              </div>
+            )}
+          </div>
+          {activeDownload && <p className="notification-foot">Keep this tab open until the download finishes.</p>}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function SettingsMenu({ tokenKind, onLogout }) {
   const [open, setOpen] = useState(false);
   const [showPasswordModal, setShowPasswordModal] = useState(false);
@@ -721,7 +968,10 @@ function AppHeader({ title, subtitle, role, onLogout, tokenKind = "admin" }) {
           <p className="app-header-subtitle">{subtitle || "Manage clients, process runs, and track performance across all athletes."}</p>
         </div>
       </div>
-      <SettingsMenu tokenKind={tokenKind} onLogout={onLogout} />
+      <div className="header-actions">
+        <NotificationBell tokenKind={tokenKind} />
+        <SettingsMenu tokenKind={tokenKind} onLogout={onLogout} />
+      </div>
     </header>
   );
 }
@@ -840,28 +1090,114 @@ const NOTE_SOURCE_LABELS = {
   coach: "Edited by coach",
 };
 
-async function downloadAttemptVideo(attemptId, mode, format, tokenKind) {
-  const data = await api(`/videos/${attemptId}/download-url?mode=${mode}&format=${format}`, { token: getToken(tokenKind) });
-  const url = String(data.download_url).startsWith("http") ? data.download_url : `${API_BASE}${data.download_url}`;
+function saveWithLink(href, filename) {
   const link = document.createElement("a");
-  link.href = url;
-  link.download = data.filename || "";
+  link.href = href;
+  link.download = filename || "";
   document.body.appendChild(link);
   link.click();
   link.remove();
-  return data.filename;
+}
+
+function formatMegabytes(bytes) {
+  return `${(bytes / (1024 * 1024)).toFixed(bytes >= 100 * 1024 * 1024 ? 0 : 1)} MB`;
+}
+
+// Downloads the file in the page so progress can be shown, then saves it.
+// If the file host does not allow this (e.g. S3 without a CORS GET rule),
+// it falls back to a normal browser download. Returns { filename, inApp }.
+async function downloadAttemptVideo(attemptId, mode, format, tokenKind, { onProgress, signal } = {}) {
+  const query = new URLSearchParams({ format });
+  if (mode) query.set("mode", mode);
+  const data = await api(`/videos/${attemptId}/download-url?${query.toString()}`, { token: getToken(tokenKind) });
+  const url = String(data.download_url).startsWith("http") ? data.download_url : `${API_BASE}${data.download_url}`;
+  const filename = data.filename || "bluerun_video.mp4";
+
+  let response;
+  try {
+    response = await fetch(url, { signal });
+  } catch (err) {
+    if (err.name === "AbortError") throw err;
+    saveWithLink(url, filename);
+    return { filename, inApp: false };
+  }
+  if (!response.ok || !response.body) {
+    saveWithLink(url, filename);
+    return { filename, inApp: false };
+  }
+
+  const total = Number(response.headers.get("content-length")) || 0;
+  const reader = response.body.getReader();
+  const chunks = [];
+  let received = 0;
+  onProgress?.({ received, total });
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+    received += value.length;
+    onProgress?.({ received, total });
+  }
+  const blobUrl = URL.createObjectURL(new Blob(chunks, { type: "video/mp4" }));
+  saveWithLink(blobUrl, filename);
+  window.setTimeout(() => URL.revokeObjectURL(blobUrl), 60000);
+  return { filename, inApp: true };
 }
 
 function DownloadMenu({ attempt, tokenKind }) {
-  const available = attempt.available_downloads || {};
-  const defaultMode = (available.coach || []).includes("original") ? "coach" : "athlete";
+  const [status, setStatus] = useState({
+    available: attempt.available_downloads || {},
+    pending: attempt.pending_downloads || [],
+    preparable: attempt.preparable_downloads || {},
+    progress: attempt.download_progress || {},
+  });
+  const defaultMode = (status.available.coach || []).includes("original") ? "coach" : "athlete";
   const [open, setOpen] = useState(false);
   const [mode, setMode] = useState(defaultMode);
   const [busyFormat, setBusyFormat] = useState("");
   const [error, setError] = useState("");
   const [started, setStarted] = useState("");
+  const [progress, setProgress] = useState(null); // { label, received, total }
+  const abortRef = useRef(null);
   const menuRef = useRef(null);
-  const pending = Boolean(attempt.downloads_pending);
+
+  useEffect(() => () => abortRef.current?.abort(), []);
+
+  // Keep in sync with the card when the list refreshes.
+  useEffect(() => {
+    setStatus({
+      available: attempt.available_downloads || {},
+      pending: attempt.pending_downloads || [],
+      preparable: attempt.preparable_downloads || {},
+      progress: attempt.download_progress || {},
+    });
+  }, [attempt.available_downloads, attempt.pending_downloads, attempt.preparable_downloads, attempt.download_progress]);
+
+  const pendingCount = status.pending.length;
+  // While a version is being made, check this run every few seconds.
+  useEffect(() => {
+    if (!pendingCount) return undefined;
+    let cancelled = false;
+    const timer = window.setInterval(async () => {
+      try {
+        const data = await api(`/videos/${attempt.id}/download-status`, { token: getToken(tokenKind) });
+        if (!cancelled) {
+          setStatus({
+            available: data.available_downloads || {},
+            pending: data.pending_downloads || [],
+            preparable: data.preparable_downloads || {},
+            progress: data.download_progress || {},
+          });
+        }
+      } catch {
+        // try again on the next tick
+      }
+    }, 5000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [pendingCount, attempt.id, tokenKind]);
 
   useEffect(() => {
     if (!open) return undefined;
@@ -886,24 +1222,64 @@ function DownloadMenu({ attempt, tokenKind }) {
     return () => window.clearTimeout(timer);
   }, [started]);
 
-  async function choose(format) {
+  async function download(format) {
     setError("");
     setStarted("");
     setBusyFormat(format);
+    const controller = new AbortController();
+    abortRef.current = controller;
+    const label = `${DOWNLOAD_MODES.find((m) => m.key === mode)?.label} · ${DOWNLOAD_FORMATS.find((f) => f.key === format)?.label}`;
     try {
-      const filename = await downloadAttemptVideo(attempt.id, mode, format, tokenKind);
-      setStarted(filename || "your video");
+      const result = await downloadAttemptVideo(attempt.id, mode, format, tokenKind, {
+        signal: controller.signal,
+        onProgress: ({ received, total }) => setProgress({ label, received, total }),
+      });
+      setStarted(result.inApp ? `Saved ${result.filename}.` : `Download started. Check your browser's downloads for ${result.filename}.`);
     } catch (err) {
-      setError(err.message || "Download failed");
+      if (err.name === "AbortError") {
+        setError("Download cancelled.");
+      } else {
+        setError(err.message || "Download failed");
+      }
+    } finally {
+      abortRef.current = null;
+      setProgress(null);
+      setBusyFormat("");
+    }
+  }
+
+  const percent = progress?.total ? Math.min(100, Math.round((progress.received / progress.total) * 100)) : null;
+
+  async function prepare(format) {
+    setError("");
+    setBusyFormat(format);
+    try {
+      await api(`/videos/${attempt.id}/prepare?mode=${mode}&format=${format}`, { method: "POST", token: getToken(tokenKind) });
+      // Let the notification bell show it right away.
+      window.dispatchEvent(new Event("bluerun:notifications-refresh"));
+      setStatus((current) => ({
+        ...current,
+        pending: [...new Set([...current.pending, `${mode}:${format}`])],
+        preparable: {
+          ...current.preparable,
+          [mode]: (current.preparable[mode] || []).filter((item) => item !== format),
+        },
+      }));
+    } catch (err) {
+      setError(err.message || "Could not start this version");
     } finally {
       setBusyFormat("");
     }
   }
 
   function statusFor(format) {
-    if ((available[mode] || []).includes(format.key)) return { ready: true, text: format.detail };
-    if (pending) return { ready: false, text: "Preparing in the background..." };
-    return { ready: false, text: "Not available for this run" };
+    if ((status.available[mode] || []).includes(format.key)) return { action: "download", text: format.detail };
+    if (status.pending.includes(`${mode}:${format.key}`)) {
+      const percent = status.progress?.[`${mode}:${format.key}`];
+      return { action: null, text: percent ? `Preparing… ${percent}%` : "Preparing… usually about a minute", pending: true };
+    }
+    if ((status.preparable[mode] || []).includes(format.key)) return { action: "prepare", text: "Not made yet · click to create it" };
+    return { action: null, text: "Not available for this run" };
   }
 
   return (
@@ -915,13 +1291,15 @@ function DownloadMenu({ attempt, tokenKind }) {
         aria-expanded={open}
         onClick={() => setOpen((v) => !v)}
         title="Download this run's video"
+        style={progress ? { "--download-progress": `${percent ?? 0}%` } : undefined}
+        data-downloading={progress ? "true" : undefined}
       >
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
           <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
           <polyline points="7 10 12 15 17 10" />
           <line x1="12" y1="15" x2="12" y2="3" />
         </svg>
-        <span>Download</span>
+        <span>{progress ? (percent != null ? `${percent}%` : "Downloading…") : "Download"}</span>
       </button>
       {open && (
         <div className="download-dropdown" role="menu">
@@ -945,27 +1323,48 @@ function DownloadMenu({ attempt, tokenKind }) {
             ))}
           </div>
           {DOWNLOAD_FORMATS.map((format) => {
-            const status = statusFor(format);
+            const state = statusFor(format);
             return (
               <button
                 key={format.key}
                 type="button"
                 role="menuitem"
-                className="download-option"
-                disabled={!status.ready || Boolean(busyFormat)}
-                onClick={() => choose(format.key)}
+                className={`download-option ${state.action === "prepare" ? "is-preparable" : ""}`}
+                disabled={!state.action || Boolean(busyFormat)}
+                onClick={() => (state.action === "download" ? download(format.key) : prepare(format.key))}
               >
                 <span className={`format-glyph format-${format.key}`} aria-hidden="true" />
                 <span className="download-option-text">
-                  <strong>{busyFormat === format.key ? "Getting link..." : format.label}</strong>
-                  <small className={!status.ready && pending ? "is-pending" : ""}>{status.text}</small>
+                  <strong>
+                    {busyFormat === format.key
+                      ? (state.action === "prepare" ? "Starting..." : "Getting link...")
+                      : format.label}
+                  </strong>
+                  <small className={state.pending ? "is-pending" : ""}>
+                    {state.pending && <span className="mini-spinner" aria-hidden="true" />}
+                    {state.text}
+                  </small>
                 </span>
+                {state.action === "prepare" && <span className="download-option-badge">Create</span>}
               </button>
             );
           })}
-          {started && (
-            <p className="download-started">Download started. Check your browser's downloads for {started}.</p>
+          {progress && (
+            <div className="download-progress" role="status" aria-live="polite">
+              <div className="download-progress-head">
+                <span>Downloading {progress.label}</span>
+                <button type="button" onClick={() => abortRef.current?.abort()}>Cancel</button>
+              </div>
+              <div className={`download-progress-track ${percent == null ? "is-indeterminate" : ""}`}>
+                <div style={{ width: percent == null ? "35%" : `${percent}%` }} />
+              </div>
+              <small>
+                {formatMegabytes(progress.received)}
+                {progress.total ? ` of ${formatMegabytes(progress.total)} · ${percent}%` : ""}
+              </small>
+            </div>
           )}
+          {started && <p className="download-started">{started}</p>}
           {error && <p className="download-error">{error}</p>}
         </div>
       )}
@@ -1384,6 +1783,17 @@ function extractDriveId(linkOrId) {
 
 function UploadAnalysisPanel({ token, clients = [], fixedUser = null, onCompleted, onJobQueued, onGoToQueue }) {
   const [uploadSource, setUploadSource] = useState("local"); // "local" | "drive"
+  const [directUpload, setDirectUpload] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    api("/config/uploads")
+      .then((config) => !cancelled && setDirectUpload(Boolean(config.direct_s3)))
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
   const [uploadState, setUploadState] = useState("");
   const [uploadProgress, setUploadProgress] = useState(0); // 0-100
   const [progressPhase, setProgressPhase] = useState(""); // 'uploading' | 'queued' | ''
@@ -1657,6 +2067,52 @@ function UploadAnalysisPanel({ token, clients = [], fixedUser = null, onComplete
     });
   }
 
+  // Direct upload: the browser sends the file straight to S3 with a signed form.
+  function uploadToStorage(signed, file) {
+    return new Promise((resolve, reject) => {
+      const body = new FormData();
+      Object.entries(signed.fields || {}).forEach(([name, value]) => body.append(name, value));
+      body.append("file", file);
+      const xhr = new XMLHttpRequest();
+      xhr.open("POST", signed.url);
+      xhr.upload.onprogress = (event) => {
+        if (event.lengthComputable) {
+          const percent = Math.round((event.loaded / event.total) * 100);
+          setUploadProgress(percent);
+          setUploadState(`Uploading video file (${percent}%)...`);
+        }
+      };
+      xhr.onload = () => (xhr.status >= 200 && xhr.status < 300
+        ? resolve()
+        : reject(new Error("The upload to storage failed. Please try again.")));
+      xhr.onerror = () => reject(new Error("Network error during upload. Please check your connection."));
+      xhr.send(body);
+    });
+  }
+
+  async function submitDirectUpload(formElement, file, targetUserId) {
+    const contentType = file.type || "video/mp4";
+    const signed = await api("/uploads/presign", {
+      method: "POST",
+      token,
+      body: { file_name: file.name, content_type: contentType, size: file.size },
+    });
+    await uploadToStorage(signed, file);
+    setUploadState("Upload complete. Queueing analysis...");
+    return api("/analyze-s3/", {
+      method: "POST",
+      token,
+      body: {
+        s3_key: signed.key,
+        file_name: file.name,
+        user_id: targetUserId,
+        display_mode: formElement.querySelector('[name="display_mode"]')?.value || "athlete",
+        report: Boolean(formElement.querySelector('[name="report"]')?.checked),
+        rotation: videoRotation || null,
+      },
+    });
+  }
+
   async function submitUpload(event) {
     event.preventDefault();
     const formElement = event.currentTarget;
@@ -1679,15 +2135,19 @@ function UploadAnalysisPanel({ token, clients = [], fixedUser = null, onComplete
         if (!file) {
           throw new Error("Please choose or drop a video file before uploading.");
         }
-        const formData = new FormData(formElement);
-        formData.set("user_id", targetUserId);
-        if (!videoRotation) {
-          formData.delete("rotation");
+        if (directUpload) {
+          response = await submitDirectUpload(formElement, file, targetUserId);
+        } else {
+          const formData = new FormData(formElement);
+          formData.set("user_id", targetUserId);
+          if (!videoRotation) {
+            formData.delete("rotation");
+          }
+          response = await uploadWithProgress(
+            `${API_BASE}/api/analyze-premium-overlay/`,
+            formData
+          );
         }
-        response = await uploadWithProgress(
-          `${API_BASE}/api/analyze-premium-overlay/`,
-          formData
-        );
       } else {
         const targetFileId = driveFile?.id || extractDriveId(driveLinkInput);
         if (!targetFileId) {
@@ -3282,6 +3742,8 @@ function AdminDashboard() {
   const previousActiveJobs = useRef(activeJobsCount);
   useEffect(() => {
     if (token && previousActiveJobs.current > 0 && activeJobsCount < previousActiveJobs.current) {
+      // A job just finished: refresh runs, leaderboards and athlete run counts.
+      loadActivity().catch(() => {});
       loadData().catch(() => {});
     }
     previousActiveJobs.current = activeJobsCount;
@@ -3289,17 +3751,14 @@ function AdminDashboard() {
 
   useEffect(() => {
     if (!token) return;
-    const intervalTime = activeJobsCount > 0 ? 2500 : 8000;
+    const intervalTime = activeJobsCount > 0 ? JOBS_POLL_ACTIVE_MS : JOBS_POLL_IDLE_MS;
     const interval = setInterval(() => {
-      loadJobs();
-      if (activeJobsCount > 0) {
-        loadActivity();
-      }
+      if (document.visibilityState !== "hidden") loadJobs();
     }, intervalTime);
     return () => clearInterval(interval);
   }, [token, activeJobsCount]);
 
-  useAutoRefresh(loadActivity, Boolean(token));
+  useAutoRefresh(loadActivity, Boolean(token), ADMIN_ACTIVITY_FALLBACK_MS);
 
   const clients = useMemo(() => users.filter((user) => user.role !== "admin"), [users]);
   const clientsById = useMemo(() => Object.fromEntries(users.map((u) => [u.id, u.name])), [users]);

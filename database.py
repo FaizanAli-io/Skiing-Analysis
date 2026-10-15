@@ -29,11 +29,13 @@ engine = create_engine(
     pool_pre_ping=True,             # Validate connections before use
     pool_recycle=3600,              # Recycle connections every hour (3600 seconds)
     pool_timeout=30,                # Timeout when getting connection from pool
+    # SSL options apply to PostgreSQL only; a SQLite URL (local end-to-end
+    # testing) connects without them.
     connect_args={
         "sslmode": "require",
         "connect_timeout": 30,
         "application_name": "ski-analysis-platform"
-    }
+    } if SQLALCHEMY_DATABASE_URL.startswith("postgres") else {"check_same_thread": False}
 )
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
@@ -55,44 +57,66 @@ def close_session_quietly(db):
             pass
 
 
+# Additive, idempotent schema changes for existing databases. Editing this list
+# changes the schema version, so the next start-up / migrate.py applies it.
+SCHEMA_STATEMENTS = [
+    "ALTER TABLE persons ADD COLUMN IF NOT EXISTS phone_number VARCHAR(20)",
+    "ALTER TABLE persons ADD COLUMN IF NOT EXISTS password_hash VARCHAR(255)",
+    "ALTER TABLE persons ADD COLUMN IF NOT EXISTS role VARCHAR(20) DEFAULT 'client'",
+    "ALTER TABLE persons ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE",
+    "ALTER TABLE persons ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+    "ALTER TABLE persons ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+    "ALTER TABLE video_analysis ADD COLUMN IF NOT EXISTS attempt_number INTEGER",
+    "ALTER TABLE video_analysis ADD COLUMN IF NOT EXISTS display_mode VARCHAR(50)",
+    "ALTER TABLE video_analysis ADD COLUMN IF NOT EXISTS overlay_renderer VARCHAR(50)",
+    "ALTER TABLE video_analysis ADD COLUMN IF NOT EXISTS input_video_path VARCHAR(500)",
+    "ALTER TABLE video_analysis ADD COLUMN IF NOT EXISTS output_video_path VARCHAR(500)",
+    "ALTER TABLE video_analysis ADD COLUMN IF NOT EXISTS report_path VARCHAR(500)",
+    "ALTER TABLE video_analysis ADD COLUMN IF NOT EXISTS blue_iq_score FLOAT",
+    "ALTER TABLE video_analysis ADD COLUMN IF NOT EXISTS turns INTEGER",
+    "ALTER TABLE video_analysis ADD COLUMN IF NOT EXISTS duration FLOAT",
+    "ALTER TABLE video_analysis ADD COLUMN IF NOT EXISTS status VARCHAR(50)",
+    "ALTER TABLE video_analysis ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+    "ALTER TABLE video_analysis ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+    "ALTER TABLE video_analysis ADD COLUMN IF NOT EXISTS s3_video_key VARCHAR(500)",
+    "ALTER TABLE video_analysis ADD COLUMN IF NOT EXISTS s3_report_key VARCHAR(500)",
+    "ALTER TABLE video_analysis ADD COLUMN IF NOT EXISTS s3_snapshot_key VARCHAR(500)",
+    "ALTER TABLE video_analysis ADD COLUMN IF NOT EXISTS instructor_notes TEXT",
+    "ALTER TABLE video_analysis ADD COLUMN IF NOT EXISTS notes_source VARCHAR(20)",
+    "ALTER TABLE video_analysis ADD COLUMN IF NOT EXISTS video_exports JSON",
+    "ALTER TABLE video_analysis ADD COLUMN IF NOT EXISTS exports_status VARCHAR(20)",
+    "ALTER TABLE video_analysis ADD COLUMN IF NOT EXISTS exports_updated_at TIMESTAMP",
+    "ALTER TABLE persons ADD COLUMN IF NOT EXISTS token_version INTEGER DEFAULT 0",
+    "UPDATE persons SET token_version = 0 WHERE token_version IS NULL",
+    "ALTER TABLE video_analysis ADD COLUMN IF NOT EXISTS is_archived BOOLEAN DEFAULT FALSE",
+    "UPDATE video_analysis SET is_archived = FALSE WHERE is_archived IS NULL",
+    "UPDATE persons SET role = 'client' WHERE role IS NULL",
+    "UPDATE persons SET is_active = TRUE WHERE is_active IS NULL",
+    "CREATE INDEX IF NOT EXISTS ix_video_analysis_person_created ON video_analysis (person_id, created_at)",
+    "CREATE INDEX IF NOT EXISTS ix_video_analysis_created_at ON video_analysis (created_at)",
+    "CREATE INDEX IF NOT EXISTS ix_analysis_jobs_person_id ON analysis_jobs (person_id)",
+    "CREATE INDEX IF NOT EXISTS ix_analysis_jobs_status_created ON analysis_jobs (status, created_at)",
+    "ALTER TABLE analysis_jobs ADD COLUMN IF NOT EXISTS runner VARCHAR(20)",
+    "ALTER TABLE analysis_jobs ADD COLUMN IF NOT EXISTS job_kind VARCHAR(20)",
+    "ALTER TABLE analysis_jobs ADD COLUMN IF NOT EXISTS payload JSON",
+    "ALTER TABLE analysis_jobs ADD COLUMN IF NOT EXISTS attempts INTEGER DEFAULT 0",
+    "ALTER TABLE analysis_jobs ADD COLUMN IF NOT EXISTS runner_host VARCHAR(255)",
+    "CREATE INDEX IF NOT EXISTS ix_analysis_jobs_runner_status ON analysis_jobs (runner, status, created_at)",
+    "ALTER TABLE video_analysis ADD COLUMN IF NOT EXISTS export_source JSON",
+    "ALTER TABLE video_analysis ADD COLUMN IF NOT EXISTS export_requests JSON",
+    "ALTER TABLE video_analysis ADD COLUMN IF NOT EXISTS export_requesters JSON",
+    "ALTER TABLE video_analysis ADD COLUMN IF NOT EXISTS export_progress JSON",
+    "ALTER TABLE video_analysis ADD COLUMN IF NOT EXISTS export_attempts INTEGER",
+    "ALTER TABLE notifications ADD COLUMN IF NOT EXISTS video_mode VARCHAR(20)",
+    "ALTER TABLE notifications ADD COLUMN IF NOT EXISTS video_format VARCHAR(20)",
+    "CREATE INDEX IF NOT EXISTS ix_video_analysis_exports_status ON video_analysis (exports_status)",
+]
+
+
 def ensure_database_schema():
     """Add new app columns to existing tables without dropping user data."""
-    statements = [
-        "ALTER TABLE persons ADD COLUMN IF NOT EXISTS phone_number VARCHAR(20)",
-        "ALTER TABLE persons ADD COLUMN IF NOT EXISTS password_hash VARCHAR(255)",
-        "ALTER TABLE persons ADD COLUMN IF NOT EXISTS role VARCHAR(20) DEFAULT 'client'",
-        "ALTER TABLE persons ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE",
-        "ALTER TABLE persons ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
-        "ALTER TABLE persons ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
-        "ALTER TABLE video_analysis ADD COLUMN IF NOT EXISTS attempt_number INTEGER",
-        "ALTER TABLE video_analysis ADD COLUMN IF NOT EXISTS display_mode VARCHAR(50)",
-        "ALTER TABLE video_analysis ADD COLUMN IF NOT EXISTS overlay_renderer VARCHAR(50)",
-        "ALTER TABLE video_analysis ADD COLUMN IF NOT EXISTS input_video_path VARCHAR(500)",
-        "ALTER TABLE video_analysis ADD COLUMN IF NOT EXISTS output_video_path VARCHAR(500)",
-        "ALTER TABLE video_analysis ADD COLUMN IF NOT EXISTS report_path VARCHAR(500)",
-        "ALTER TABLE video_analysis ADD COLUMN IF NOT EXISTS blue_iq_score FLOAT",
-        "ALTER TABLE video_analysis ADD COLUMN IF NOT EXISTS turns INTEGER",
-        "ALTER TABLE video_analysis ADD COLUMN IF NOT EXISTS duration FLOAT",
-        "ALTER TABLE video_analysis ADD COLUMN IF NOT EXISTS status VARCHAR(50)",
-        "ALTER TABLE video_analysis ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
-        "ALTER TABLE video_analysis ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
-        "ALTER TABLE video_analysis ADD COLUMN IF NOT EXISTS s3_video_key VARCHAR(500)",
-        "ALTER TABLE video_analysis ADD COLUMN IF NOT EXISTS s3_report_key VARCHAR(500)",
-        "ALTER TABLE video_analysis ADD COLUMN IF NOT EXISTS s3_snapshot_key VARCHAR(500)",
-        "ALTER TABLE video_analysis ADD COLUMN IF NOT EXISTS instructor_notes TEXT",
-        "ALTER TABLE video_analysis ADD COLUMN IF NOT EXISTS notes_source VARCHAR(20)",
-        "ALTER TABLE video_analysis ADD COLUMN IF NOT EXISTS video_exports JSON",
-        "ALTER TABLE video_analysis ADD COLUMN IF NOT EXISTS exports_status VARCHAR(20)",
-        "ALTER TABLE video_analysis ADD COLUMN IF NOT EXISTS exports_updated_at TIMESTAMP",
-        "ALTER TABLE persons ADD COLUMN IF NOT EXISTS token_version INTEGER DEFAULT 0",
-        "UPDATE persons SET token_version = 0 WHERE token_version IS NULL",
-        "ALTER TABLE video_analysis ADD COLUMN IF NOT EXISTS is_archived BOOLEAN DEFAULT FALSE",
-        "UPDATE video_analysis SET is_archived = FALSE WHERE is_archived IS NULL",
-        "UPDATE persons SET role = 'client' WHERE role IS NULL",
-        "UPDATE persons SET is_active = TRUE WHERE is_active IS NULL",
-    ]
     with engine.begin() as connection:
-        for statement in statements:
+        for statement in SCHEMA_STATEMENTS:
             connection.execute(text(statement))
 
 

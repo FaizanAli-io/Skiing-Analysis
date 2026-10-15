@@ -61,6 +61,12 @@ def _send_code(email: str, code: str, purpose: str) -> None:
         raise HTTPException(status_code=502, detail="We could not send the email right now. Please try again shortly.")
 
 
+def _notify_password_changed(user: Person) -> None:
+    """Security email to the account owner (when email is configured)."""
+    if user.email and email_service.is_configured():
+        email_service.send_in_background(email_service.send_password_changed_email, user.email, user.name or "")
+
+
 @router.get("/config", response_model=AuthConfig)
 def auth_config():
     """Tell the frontend which email-based flows are switched on."""
@@ -192,6 +198,7 @@ def reset_password(payload: ResetPasswordRequest, db: Session = Depends(get_db))
     # Signs out every existing session for this account.
     user.token_version = (user.token_version or 0) + 1
     db.commit()
+    _notify_password_changed(user)
     return MessageResponse(message="Your password has been reset. You can sign in now.")
 
 
@@ -213,4 +220,5 @@ def change_password(
     user.token_version = (user.token_version or 0) + 1
     db.commit()
     db.refresh(user)
+    _notify_password_changed(user)
     return _auth_response(user)

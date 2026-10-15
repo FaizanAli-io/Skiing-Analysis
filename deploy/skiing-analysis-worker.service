@@ -1,0 +1,27 @@
+# Bluerun video worker: runs analysis jobs and download versions one at a time,
+# outside the web API. Install:
+#   sudo cp deploy/skiing-analysis-worker.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now skiing-analysis-worker
+[Unit]
+Description=Bluerun video worker (analysis + download versions)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+# Must be the same folder (and machine) as the API service.
+WorkingDirectory=/home/ubuntu/Skiing-Analysis
+EnvironmentFile=/home/ubuntu/Skiing-Analysis/.env
+Environment="PATH=/home/ubuntu/Skiing-Analysis/venv312/bin:/usr/local/bin:/usr/bin:/bin"
+ExecStart=/home/ubuntu/Skiing-Analysis/venv312/bin/python worker.py
+Restart=always
+RestartSec=10
+# On stop/restart the worker finishes its current job first (up to 5 min).
+KillSignal=SIGTERM
+TimeoutStopSec=300
+# Video work yields to the web API when the CPU is busy.
+Nice=5
+
+[Install]
+WantedBy=multi-user.target

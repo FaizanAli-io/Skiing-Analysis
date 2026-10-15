@@ -13,13 +13,14 @@ from models.person import Person
 from models.video_analysis import VideoAnalysis
 from models.analysis_timeline import AnalysisTimeline
 from models.analysis_job import AnalysisJob
+from models.notification import Notification
 from schemas.analysis_timeline import AnalysisTimelineOut
 from schemas.person import AdminPersonOut, PersonOut
 from schemas.video_analysis import VideoAnalysisOut
 from schemas.personal_best import LeaderboardsResponse, PersonalBestsResponse
 from services.auth import require_admin
 from services.coach_notes import MAX_NOTE_CHARS
-from services.video_exports import export_entries
+from services.video_exports import export_entries, source_entries
 from services.aws_s3 import S3Manager, AWS_S3_BUCKET
 from services.personal_bests import (
     build_leaderboards,
@@ -222,8 +223,9 @@ def admin_delete_attempt(
     # 1. Unlink any analysis jobs referencing this video analysis
     db.query(AnalysisJob).filter(AnalysisJob.video_analysis_id == attempt_id).update({"video_analysis_id": None})
 
-    # 2. Delete associated timeline if exists
+    # 2. Delete associated timeline and notifications if they exist
     db.query(AnalysisTimeline).filter(AnalysisTimeline.video_analysis_id == attempt_id).delete()
+    db.query(Notification).filter(Notification.analysis_id == attempt_id).delete()
 
     # 3. Clean up S3 files if enabled
     if S3Manager.is_enabled() and AWS_S3_BUCKET:
@@ -232,6 +234,7 @@ def admin_delete_attempt(
             attempt.s3_report_key,
             attempt.s3_snapshot_key,
             *export_entries(attempt, "s3_key"),
+            *source_entries(attempt, "s3_key"),
         ):
             if key:
                 try:
@@ -245,6 +248,7 @@ def admin_delete_attempt(
         attempt.output_video_path,
         attempt.report_path,
         *export_entries(attempt, "path"),
+        *source_entries(attempt, "path"),
     ):
         if path and os.path.exists(path):
             try:

@@ -10,7 +10,11 @@ def create_job(
     person_id: int,
     file_name: str,
     display_mode: str = "coach",
-    generate_report: bool = True
+    generate_report: bool = True,
+    runner: Optional[str] = None,
+    job_kind: Optional[str] = None,
+    payload: Optional[dict] = None,
+    runner_host: Optional[str] = None,
 ) -> AnalysisJob:
     """Create a new analysis job"""
     job = AnalysisJob(
@@ -20,7 +24,12 @@ def create_job(
         display_mode=display_mode,
         generate_report=1 if generate_report else 0,
         status="pending",
-        progress=0
+        progress=0,
+        runner=runner,
+        job_kind=job_kind,
+        payload=payload,
+        attempts=0,
+        runner_host=runner_host,
     )
     db.add(job)
     db.commit()

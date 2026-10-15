@@ -74,6 +74,10 @@ echo "JWT_SECRET=your_jwt_secret"
 echo "DEFAULT_ADMIN_EMAIL=admin@example.com"
 echo "DEFAULT_ADMIN_PASSWORD=secure_password"
 echo "DEFAULT_ADMIN_NAME=Bluerun Admin"
+echo "JOB_RUNNER=worker"
+echo "RUN_MIGRATIONS_ON_STARTUP=false"
+echo "EXPORT_WORKERS=1"
+echo "(see PRODUCTION_SETUP.md for every setting)"
 echo ""
 
 read -p "Have you created the .env file? (y/n) " -n 1 -r
@@ -96,21 +100,7 @@ else
 fi
 
 echo -e "${GREEN}Step 8: Running database migrations...${NC}"
-python3 << EOF
-from database import Base, engine, ensure_database_schema
-from main import ensure_default_admin
-
-print("Creating database tables...")
-Base.metadata.create_all(engine)
-
-print("Running schema updates...")
-ensure_database_schema()
-
-print("Creating default admin user...")
-ensure_default_admin()
-
-print("Database setup complete!")
-EOF
+python3 migrate.py
 
 echo -e "${GREEN}Step 9: Testing AWS S3 connection...${NC}"
 aws configure list
@@ -147,10 +137,13 @@ RestartSec=10
 WantedBy=multi-user.target
 EOF
 
-echo -e "${GREEN}Step 12: Starting the application service...${NC}"
+echo -e "${GREEN}Step 11b: Setting up the video worker service...${NC}"
+sed -e "s#/home/ubuntu/Skiing-Analysis#$APP_DIR#g" -e "s#venv312#venv#g"     deploy/skiing-analysis-worker.service | sudo tee /etc/systemd/system/skiing-analysis-worker.service > /dev/null
+
+echo -e "${GREEN}Step 12: Starting the application and worker services...${NC}"
 sudo systemctl daemon-reload
-sudo systemctl enable skiing-analysis
-sudo systemctl start skiing-analysis
+sudo systemctl enable skiing-analysis skiing-analysis-worker
+sudo systemctl start skiing-analysis skiing-analysis-worker
 
 echo -e "${GREEN}Step 13: Checking application status...${NC}"
 sleep 3

@@ -1232,7 +1232,8 @@ def _draw_pdf_report(report_path: str, payload: Dict[str, Any], sections: Dict[s
         draw.rounded_rectangle((60, notes_y, 1215, notes_y + notes_h), radius=24, fill=(10, 24, 42), outline=(38, 86, 140), width=2)
         draw.text((92, notes_y + 18), "Coach's Note", fill=(238, 246, 255), font=fonts["section"])
         raw_note = str(instructor_notes).strip()
-        formatted_note = raw_note if (raw_note.startswith('"') and raw_note.endswith('"') and len(raw_note) >= 2) else f'"{raw_note}"'
+        # Shown as plain text, without surrounding quotation marks.
+        formatted_note = raw_note.strip().strip('"“”').strip()
         note_body = _fit_text_to_lines(
             draw,
             formatted_note,

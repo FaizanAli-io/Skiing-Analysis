@@ -1,10 +1,16 @@
-from sqlalchemy import Column, Integer, String, Float, ForeignKey, DateTime, Boolean, Text, JSON
+from sqlalchemy import Column, Integer, String, Float, ForeignKey, DateTime, Boolean, Text, JSON, Index
 from sqlalchemy.orm import relationship
 from database import Base
 from datetime import datetime
 
 class VideoAnalysis(Base):
     __tablename__ = 'video_analysis'
+    __table_args__ = (
+        # Athlete history, run counts and the dashboard's day filter.
+        Index("ix_video_analysis_person_created", "person_id", "created_at"),
+        Index("ix_video_analysis_created_at", "created_at"),
+        Index("ix_video_analysis_exports_status", "exports_status"),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
     person_id = Column(Integer, ForeignKey("persons.id"))
@@ -22,6 +28,14 @@ class VideoAnalysis(Base):
     video_exports = Column(JSON, nullable=True)
     exports_status = Column(String(20), nullable=True)  # processing, ready, failed
     exports_updated_at = Column(DateTime, nullable=True)
+    # Where the footage needed to render more versions on demand is kept,
+    # and which versions have been asked for but are not ready yet.
+    export_source = Column(JSON, nullable=True)
+    export_requests = Column(JSON, nullable=True)
+    # {"coach:square": [person ids who asked]} and {"coach:square": 40} (percent)
+    export_requesters = Column(JSON, nullable=True)
+    export_progress = Column(JSON, nullable=True)
+    export_attempts = Column(Integer, nullable=True)  # restarts after a stalled render
     display_mode = Column(String(50), nullable=True)
     overlay_renderer = Column(String(50), nullable=True)
 
@@ -67,10 +81,38 @@ class VideoAnalysis(Base):
         return {mode: sorted(formats, key=order.index) for mode, formats in available.items()}
 
     @property
-    def downloads_pending(self) -> bool:
+    def pending_downloads(self) -> list:
+        """Versions being rendered right now, as "mode:format"."""
         from services.video_exports import is_pending
 
-        return is_pending(self.exports_status, self.exports_updated_at)
+        if not is_pending(self.exports_status, self.exports_updated_at):
+            return []
+        return list(self.export_requests or [])
+
+    @property
+    def download_progress(self) -> dict:
+        """{"mode:format": percent} for versions being made right now."""
+        pending = set(self.pending_downloads)
+        return {k: int(v) for k, v in (self.export_progress or {}).items() if k in pending}
+
+    @property
+    def downloads_pending(self) -> bool:
+        return bool(self.pending_downloads)
+
+    @property
+    def preparable_downloads(self) -> dict:
+        """{mode: [formats]} not made yet but can be made on request."""
+        from services.video_exports import planned_variants, source_available
+
+        result = {"athlete": [], "coach": []}
+        if not source_available(self.export_source):
+            return result
+        available = self.available_downloads
+        pending = set(self.pending_downloads)
+        for mode, fmt in planned_variants(self.main_video_mode):
+            if fmt not in available.get(mode, []) and f"{mode}:{fmt}" not in pending:
+                result[mode].append(fmt)
+        return result
 
     @property
     def person_name(self):
