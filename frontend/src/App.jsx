@@ -1811,9 +1811,29 @@ function UploadAnalysisPanel({ token, clients = [], fixedUser = null, onComplete
   const [previewUrl, setPreviewUrl] = useState("");
   const [videoRotation, setVideoRotation] = useState(""); // "" (auto), "-90", "90", "180", "0"
   const [isPortraitDetected, setIsPortraitDetected] = useState(false);
+  // Files the browser cannot play (e.g. iPhone HEVC .MOV): uploaded right away
+  // and previewed from a frame the server extracts.
+  const [serverPreview, setServerPreview] = useState(null); // { src, width, height }
+  const [stagedUpload, setStagedUpload] = useState(null); // { stagingId } or { s3Key }
+  const [stagingState, setStagingState] = useState(null); // { phase, percent, error }
+  const stagingRunRef = useRef(0);
+
+  function applyOrientation(width, height) {
+    const isPortrait = height > width;
+    setIsPortraitDetected(isPortrait);
+    setVideoRotation(isPortrait ? "-90" : "");
+  }
+
+  function resetServerPreview() {
+    stagingRunRef.current += 1; // ignore results from an earlier file
+    setServerPreview(null);
+    setStagedUpload(null);
+    setStagingState(null);
+  }
 
   function handleLocalFileSelect(e) {
     const file = e.target.files?.[0];
+    resetServerPreview();
     if (!file) {
       setSelectedFileName("");
       setSelectedFileSize("");
@@ -1830,18 +1850,92 @@ function UploadAnalysisPanel({ token, clients = [], fixedUser = null, onComplete
     if (previewUrl) URL.revokeObjectURL(previewUrl);
     setPreviewUrl(url);
 
+    // Can this browser actually decode it? Some formats load metadata but
+    // have no picture (width 0), others error out or never load.
     const v = document.createElement("video");
     v.preload = "metadata";
-    v.src = url;
-    v.onloadedmetadata = () => {
-      const isPortrait = v.videoHeight > v.videoWidth;
-      setIsPortraitDetected(isPortrait);
-      if (isPortrait) {
-        setVideoRotation("-90");
-      } else {
-        setVideoRotation("");
-      }
+    v.muted = true;
+    let settled = false;
+    const fallback = () => {
+      if (settled) return;
+      settled = true;
+      startServerPreview(file);
     };
+    const timer = window.setTimeout(fallback, 4000);
+    v.onloadedmetadata = () => {
+      if (!v.videoWidth || !v.videoHeight) return fallback();
+      settled = true;
+      window.clearTimeout(timer);
+      applyOrientation(v.videoWidth, v.videoHeight);
+    };
+    v.onerror = () => {
+      window.clearTimeout(timer);
+      fallback();
+    };
+    v.src = url;
+  }
+
+  function stageToServer(file, onProgress) {
+    return new Promise((resolve, reject) => {
+      const body = new FormData();
+      body.append("file", file);
+      const xhr = new XMLHttpRequest();
+      xhr.open("POST", `${API_BASE}/api/uploads/stage`);
+      const currentToken = resolveToken(token);
+      if (currentToken) xhr.setRequestHeader("Authorization", `Bearer ${currentToken}`);
+      xhr.upload.onprogress = (event) => {
+        if (event.lengthComputable) onProgress(Math.round((event.loaded / event.total) * 100));
+      };
+      xhr.onload = () => {
+        let data = {};
+        try {
+          data = JSON.parse(xhr.responseText);
+        } catch {
+          // keep empty
+        }
+        if (xhr.status >= 200 && xhr.status < 300) resolve(data);
+        else reject(new Error(data.detail || "The preview could not be created."));
+      };
+      xhr.onerror = () => reject(new Error("Network error while uploading. Please check your connection."));
+      xhr.send(body);
+    });
+  }
+
+  async function startServerPreview(file) {
+    const run = ++stagingRunRef.current;
+    const progress = (percent) => {
+      if (run === stagingRunRef.current) setStagingState({ phase: "uploading", percent });
+    };
+    progress(0);
+    try {
+      let result;
+      let staged;
+      if (directUpload) {
+        const signed = await api("/uploads/presign", {
+          method: "POST",
+          token,
+          body: { file_name: file.name, content_type: file.type || "video/mp4", size: file.size },
+        });
+        await uploadToStorage(signed, file, progress);
+        if (run !== stagingRunRef.current) return;
+        setStagingState({ phase: "processing", percent: 100 });
+        result = await api("/uploads/preview", { method: "POST", token, body: { s3_key: signed.key } });
+        staged = { s3Key: signed.key };
+      } else {
+        result = await stageToServer(file, (percent) => {
+          progress(percent);
+          if (percent >= 100 && run === stagingRunRef.current) setStagingState({ phase: "processing", percent: 100 });
+        });
+        staged = { stagingId: result.staging_id };
+      }
+      if (run !== stagingRunRef.current) return;
+      setServerPreview({ src: result.preview, width: result.width, height: result.height });
+      setStagedUpload(staged);
+      setStagingState(null);
+      applyOrientation(result.width, result.height);
+    } catch (err) {
+      if (run === stagingRunRef.current) setStagingState({ phase: "error", error: err.message || "Preview failed" });
+    }
   }
 
   function cycleRotation() {
@@ -2068,7 +2162,7 @@ function UploadAnalysisPanel({ token, clients = [], fixedUser = null, onComplete
   }
 
   // Direct upload: the browser sends the file straight to S3 with a signed form.
-  function uploadToStorage(signed, file) {
+  function uploadToStorage(signed, file, onProgress) {
     return new Promise((resolve, reject) => {
       const body = new FormData();
       Object.entries(signed.fields || {}).forEach(([name, value]) => body.append(name, value));
@@ -2078,8 +2172,12 @@ function UploadAnalysisPanel({ token, clients = [], fixedUser = null, onComplete
       xhr.upload.onprogress = (event) => {
         if (event.lengthComputable) {
           const percent = Math.round((event.loaded / event.total) * 100);
-          setUploadProgress(percent);
-          setUploadState(`Uploading video file (${percent}%)...`);
+          if (onProgress) {
+            onProgress(percent);
+          } else {
+            setUploadProgress(percent);
+            setUploadState(`Uploading video file (${percent}%)...`);
+          }
         }
       };
       xhr.onload = () => (xhr.status >= 200 && xhr.status < 300
@@ -2135,7 +2233,25 @@ function UploadAnalysisPanel({ token, clients = [], fixedUser = null, onComplete
         if (!file) {
           throw new Error("Please choose or drop a video file before uploading.");
         }
-        if (directUpload) {
+        if (stagingState && stagingState.phase !== "error") {
+          throw new Error("Please wait until the video has finished uploading for the preview.");
+        }
+        const jobOptions = {
+          user_id: targetUserId,
+          file_name: file.name,
+          display_mode: formElement.querySelector('[name="display_mode"]')?.value || "athlete",
+          report: Boolean(formElement.querySelector('[name="report"]')?.checked),
+          rotation: videoRotation || null,
+        };
+        if (stagedUpload?.stagingId) {
+          setUploadProgress(100);
+          setUploadState("Video already uploaded. Queueing analysis...");
+          response = await api("/analyze-staged/", { method: "POST", token, body: { staging_id: stagedUpload.stagingId, ...jobOptions } });
+        } else if (stagedUpload?.s3Key) {
+          setUploadProgress(100);
+          setUploadState("Video already uploaded. Queueing analysis...");
+          response = await api("/analyze-s3/", { method: "POST", token, body: { s3_key: stagedUpload.s3Key, ...jobOptions } });
+        } else if (directUpload) {
           response = await submitDirectUpload(formElement, file, targetUserId);
         } else {
           const formData = new FormData(formElement);
@@ -2178,6 +2294,7 @@ function UploadAnalysisPanel({ token, clients = [], fixedUser = null, onComplete
       formElement.reset();
       if (previewUrl) URL.revokeObjectURL(previewUrl);
       setPreviewUrl("");
+      resetServerPreview();
       setVideoRotation("");
       setIsPortraitDetected(false);
       setSelectedFileName("");
@@ -2459,15 +2576,47 @@ function UploadAnalysisPanel({ token, clients = [], fixedUser = null, onComplete
                 </button>
               </div>
               <div className="video-preview-wrapper">
-                <video
-                  src={previewUrl}
-                  controls
-                  style={{
-                    transform: videoRotation ? `rotate(${videoRotation}deg)` : "none",
-                    transition: "transform 0.25s ease",
-                  }}
-                />
+                {serverPreview ? (
+                  <img
+                    src={serverPreview.src}
+                    alt="Frame from the selected video"
+                    className="server-preview-frame"
+                    style={{
+                      transform: videoRotation ? `rotate(${videoRotation}deg)` : "none",
+                      transition: "transform 0.25s ease",
+                    }}
+                  />
+                ) : stagingState ? (
+                  <div className={`server-preview-status ${stagingState.phase === "error" ? "is-error" : ""}`}>
+                    {stagingState.phase === "error" ? (
+                      <>
+                        <strong>Preview unavailable</strong>
+                        <span>{stagingState.error} You can still upload; rotation will be detected automatically.</span>
+                      </>
+                    ) : (
+                      <>
+                        <strong>{stagingState.phase === "processing" ? "Creating preview…" : `Uploading for preview… ${stagingState.percent}%`}</strong>
+                        <span>This video format can't play in your browser, so the server makes the preview. The upload is reused when you queue it.</span>
+                        <div className="server-preview-track">
+                          <div style={{ width: `${stagingState.phase === "processing" ? 100 : stagingState.percent}%` }} className={stagingState.phase === "processing" ? "is-busy" : ""} />
+                        </div>
+                      </>
+                    )}
+                  </div>
+                ) : (
+                  <video
+                    src={previewUrl}
+                    controls
+                    style={{
+                      transform: videoRotation ? `rotate(${videoRotation}deg)` : "none",
+                      transition: "transform 0.25s ease",
+                    }}
+                  />
+                )}
               </div>
+              {serverPreview && (
+                <p className="server-preview-note">Still frame from the server (this format can't play in your browser). Rotate until the skier is upright.</p>
+              )}
               <div className="rotation-control-row">
                 <label>Orientation:</label>
                 <select

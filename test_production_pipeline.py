@@ -474,3 +474,82 @@ class NotificationTests(_Fixture):
         admin = self.client.get("/api/notifications", headers=self.headers("admin@test.com", "admin-pass-1")).json()
         self.assertEqual(admin["preparing_videos"], [])
 
+
+
+class StagedPreviewTests(_Fixture):
+    """Videos browsers can't play (HEVC .MOV) are previewed from a server frame."""
+
+    def setUp(self):
+        super().setUp()
+        import subprocess
+        from routes import auth as auth_routes, uploads
+        from services.video_encoding import find_ffmpeg
+
+        ffmpeg = find_ffmpeg()
+        if not ffmpeg:
+            self.skipTest("ffmpeg not installed")
+        self.mov = os.path.join(self.tmpdir.name, "iphone.MOV")
+        subprocess.run(
+            [ffmpeg, "-y", "-v", "error", "-f", "lavfi", "-i", "testsrc=size=320x180:rate=10:duration=2",
+             "-c:v", "libx265", "-tag:v", "hvc1", self.mov],
+            check=True, capture_output=True,
+        )
+        self.temp_dir = os.path.join(self.tmpdir.name, "temp_videos")
+        os.makedirs(self.temp_dir)
+
+        app = FastAPI()
+        app.include_router(uploads.router, prefix="/api")
+        app.include_router(auth_routes.router, prefix="/api")
+        app.dependency_overrides[database.get_db] = override_get_db
+        self.client = TestClient(app)
+        self.patches = [
+            mock.patch("routes.uploads.SessionLocal", TestingSession),
+            mock.patch("routes.uploads.TEMP_VIDEO_DIR", self.temp_dir),
+            mock.patch("database.SessionLocal", TestingSession),
+            mock.patch.dict(os.environ, {"JOB_RUNNER": "worker"}),
+        ]
+        for patcher in self.patches:
+            patcher.start()
+        login = self.client.post("/api/auth/login", json={"email": "admin@test.com", "password": "admin-pass-1"})
+        self.admin = {"Authorization": f"Bearer {login.json()['access_token']}"}
+
+    def tearDown(self):
+        for patcher in reversed(getattr(self, "patches", [])):
+            patcher.stop()
+        super().tearDown()
+
+    def test_stage_returns_preview_and_queue_reuses_the_file(self):
+        with open(self.mov, "rb") as handle:
+            staged = self.client.post("/api/uploads/stage", headers=self.admin,
+                                      files={"file": ("Daniel B.MOV", handle, "video/quicktime")})
+        self.assertEqual(staged.status_code, 200, staged.text)
+        body = staged.json()
+        self.assertTrue(body["preview"].startswith("data:image/jpeg;base64,"))
+        self.assertEqual((body["width"], body["height"]), (320, 180))
+        self.assertEqual(len(os.listdir(self.temp_dir)), 1)  # only the staged video, preview cleaned up
+
+        queued = self.client.post("/api/analyze-staged/", headers=self.admin, json={
+            "staging_id": body["staging_id"], "user_id": self.ids["alice"], "rotation": "-90", "file_name": "Daniel B.MOV",
+        })
+        self.assertEqual(queued.status_code, 200, queued.text)
+        db = TestingSession()
+        job = db.query(AnalysisJob).filter(AnalysisJob.id == queued.json()["job_id"]).first()
+        self.assertEqual((job.job_kind, job.runner, job.file_name), ("upload", "worker", "Daniel B.MOV"))
+        self.assertEqual(job.payload["rotation_override"], -90)
+        self.assertTrue(os.path.exists(job.payload["file_path"]))
+        db.close()
+        again = self.client.post("/api/analyze-staged/", headers=self.admin,
+                                 json={"staging_id": body["staging_id"], "user_id": self.ids["alice"]})
+        self.assertEqual(again.status_code, 404)  # staged file was moved to the job
+
+    def test_rejects_non_videos_and_bad_ids(self):
+        bad = self.client.post("/api/uploads/stage", headers=self.admin,
+                               files={"file": ("notes.pdf", b"%PDF-1.4", "application/pdf")})
+        self.assertEqual(bad.status_code, 422)
+        broken = self.client.post("/api/uploads/stage", headers=self.admin,
+                                  files={"file": ("broken.mov", b"not really a video", "video/quicktime")})
+        self.assertEqual(broken.status_code, 422)
+        self.assertEqual(os.listdir(self.temp_dir), [])
+        self.assertEqual(self.client.post("/api/analyze-staged/", headers=self.admin,
+                                          json={"staging_id": "../../etc", "user_id": self.ids["alice"]}).status_code, 404)
+        self.assertEqual(self.client.post("/api/uploads/stage", files={"file": ("a.mov", b"x", "video/quicktime")}).status_code, 401)

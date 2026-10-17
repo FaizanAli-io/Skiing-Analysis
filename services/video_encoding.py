@@ -83,3 +83,29 @@ def transcode_to_h264(
                 os.remove(temp_transcode_path)
             except OSError:
                 pass
+
+
+def extract_preview_frame(source: str, output_jpg: str, max_width: int = 960) -> None:
+    """Save one frame (about 1 s in) as a JPEG, upright as players show it.
+
+    Used for previews of formats browsers cannot play (e.g. iPhone HEVC .MOV).
+    ``source`` may be a local path or an https URL. Raises RuntimeError.
+    """
+    ffmpeg_bin = find_ffmpeg()
+    if not ffmpeg_bin:
+        raise RuntimeError("ffmpeg is required to make a preview but was not found.")
+    scale = f"scale='min({max_width},iw)':-2"
+    last_error = ""
+    for seek in ("1", "0"):  # very short clips have no frame at 1 s
+        proc = subprocess.run(
+            [ffmpeg_bin, "-y", "-v", "error", "-ss", seek, "-i", source,
+             "-frames:v", "1", "-vf", scale, "-q:v", "3", output_jpg],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        if proc.returncode == 0 and os.path.exists(output_jpg) and os.path.getsize(output_jpg) > 0:
+            return
+        last_error = proc.stderr.strip()[-300:]
+    raise RuntimeError(f"Could not read a frame from this video. {last_error}")
+
