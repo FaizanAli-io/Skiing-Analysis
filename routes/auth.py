@@ -4,6 +4,7 @@ from sqlalchemy.orm import Session
 from database import get_db
 from models.person import Person
 from schemas.auth import (
+    AdminResetPasswordRequest,
     AuthConfig,
     AuthResponse,
     AuthUser,
@@ -173,7 +174,8 @@ def forgot_password(payload: ForgotPasswordRequest, db: Session = Depends(get_db
 
     email = _normalize_email(payload.email)
     user = db.query(Person).filter(Person.email == email).first()
-    if user and user.is_active and user.email:
+    # Admin passwords are reset from the admin sign-in page only.
+    if user and user.is_active and user.email and user.role != "admin":
         try:
             code = issue_code(db, email, "password_reset")
         except HTTPException as exc:
@@ -191,7 +193,7 @@ def reset_password(payload: ResetPasswordRequest, db: Session = Depends(get_db))
     email = _normalize_email(payload.email)
     verify_code(db, email, "password_reset", payload.code)
     user = db.query(Person).filter(Person.email == email).first()
-    if not user or not user.is_active:
+    if not user or not user.is_active or user.role == "admin":
         raise HTTPException(status_code=400, detail=INVALID_CODE_MESSAGE)
 
     user.password_hash = hash_password(payload.new_password)
@@ -200,6 +202,46 @@ def reset_password(payload: ResetPasswordRequest, db: Session = Depends(get_db))
     db.commit()
     _notify_password_changed(user)
     return MessageResponse(message="Your password has been reset. You can sign in now.")
+
+
+def _main_admin(db: Session) -> Person:
+    """The Bluerun admin account whose password the admin page can reset."""
+    import os
+
+    email = _normalize_email(os.getenv("DEFAULT_ADMIN_EMAIL", ""))
+    admin = db.query(Person).filter(Person.email == email, Person.role == "admin").first() if email else None
+    if not admin or not admin.is_active:
+        raise HTTPException(status_code=503, detail="Admin password reset is not set up. Please contact support.")
+    return admin
+
+
+def _mask_email(email: str) -> str:
+    name, _, domain = email.partition("@")
+    if len(name) <= 2:
+        return f"{name[:1]}•••@{domain}"
+    return f"{name[0]}{'•' * min(6, len(name) - 2)}{name[-1]}@{domain}"
+
+
+@router.post("/password/admin-forgot", response_model=MessageResponse)
+def admin_forgot_password(db: Session = Depends(get_db)):
+    """Email a reset code to the admin account. No email is asked for."""
+    if not email_service.is_configured():
+        raise HTTPException(status_code=503, detail="Password reset by email is not available yet.")
+    admin = _main_admin(db)
+    code = issue_code(db, admin.email, "admin_reset")
+    _send_code(admin.email, code, "password_reset")
+    return MessageResponse(message=f"We sent a 6-digit code to the admin email ({_mask_email(admin.email)}).")
+
+
+@router.post("/password/admin-reset", response_model=MessageResponse)
+def admin_reset_password(payload: AdminResetPasswordRequest, db: Session = Depends(get_db)):
+    admin = _main_admin(db)
+    verify_code(db, admin.email, "admin_reset", payload.code)
+    admin.password_hash = hash_password(payload.new_password)
+    admin.token_version = (admin.token_version or 0) + 1
+    db.commit()
+    _notify_password_changed(admin)
+    return MessageResponse(message="The admin password has been reset. You can sign in now.")
 
 
 @router.post("/password/change", response_model=AuthResponse)

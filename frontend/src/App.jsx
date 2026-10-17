@@ -352,6 +352,7 @@ function AuthForm({ type }) {
   const [notice, setNotice] = useState("");
   const [loading, setLoading] = useState(false);
   const [codeStep, setCodeStep] = useState(false);
+  const [showPassword, setShowPassword] = useState(false);
   const [code, setCode] = useState("");
   const authConfig = useAuthConfig();
   const isExpired = window.location.search.includes("expired=1");
@@ -459,7 +460,19 @@ function AuthForm({ type }) {
               </button>
             )}
           </div>
-          <input type="password" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} minLength={8} required />
+          <div className="password-field">
+            <input
+              type={showPassword ? "text" : "password"}
+              value={form.password}
+              onChange={(e) => setForm({ ...form, password: e.target.value })}
+              minLength={8}
+              autoComplete={isSignup ? "new-password" : "current-password"}
+              required
+            />
+            <button type="button" className="password-toggle" onClick={() => setShowPassword((v) => !v)}>
+              {showPassword ? "Hide" : "Show"}
+            </button>
+          </div>
           {isReset && !error && (
             <div className="notice success">Your password has been reset. Please sign in.</div>
           )}
@@ -500,7 +513,9 @@ function ForgotPasswordForm() {
     setError("");
     setLoading(true);
     try {
-      const result = await api("/auth/password/forgot", { method: "POST", body: { email } });
+      const result = isAdmin
+        ? await api("/auth/password/admin-forgot", { method: "POST" })
+        : await api("/auth/password/forgot", { method: "POST", body: { email } });
       setNotice(result.message);
       setStep("reset");
     } catch (err) {
@@ -519,7 +534,11 @@ function ForgotPasswordForm() {
     }
     setLoading(true);
     try {
-      await api("/auth/password/reset", { method: "POST", body: { email, code, new_password: password } });
+      if (isAdmin) {
+        await api("/auth/password/admin-reset", { method: "POST", body: { code, new_password: password } });
+      } else {
+        await api("/auth/password/reset", { method: "POST", body: { email, code, new_password: password } });
+      }
       routeTo(`${loginPath}?reset=1`);
     } catch (err) {
       setError(err.message);
@@ -536,11 +555,17 @@ function ForgotPasswordForm() {
         <h2>{step === "email" ? "Reset your password" : "Enter your code"}</h2>
         {step === "email" ? (
           <form onSubmit={requestCode}>
-            <p className="form-intro">Enter the email you sign in with and we will send you a 6-digit code.</p>
-            <label>Email</label>
-            <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} autoComplete="email" required />
+            {isAdmin ? (
+              <p className="form-intro">A 6-digit code will be sent to the Bluerun admin email address. Enter it on the next step to set a new admin password.</p>
+            ) : (
+              <>
+                <p className="form-intro">Enter the email you sign in with and we will send you a 6-digit code.</p>
+                <label>Email</label>
+                <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} autoComplete="email" required />
+              </>
+            )}
             {error && <div className="alert">{error}</div>}
-            <button className="primary-button" disabled={loading}>{loading ? "Sending..." : "Send reset code"}</button>
+            <button className="primary-button" disabled={loading}>{loading ? "Sending..." : isAdmin ? "Send code to admin email" : "Send reset code"}</button>
           </form>
         ) : (
           <form onSubmit={resetPassword}>

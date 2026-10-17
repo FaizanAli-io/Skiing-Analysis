@@ -5554,3 +5554,13 @@ select:focus {
   text-align: center;
 }
 
+/* One show/hide control per password box: hide the browser's own reveal eye. */
+input[type="password"]::-ms-reveal,
+input[type="password"]::-ms-clear {
+  display: none;
+}
+
+input[type="password"]::-webkit-credentials-auto-fill-button {
+  visibility: hidden;
+}
+

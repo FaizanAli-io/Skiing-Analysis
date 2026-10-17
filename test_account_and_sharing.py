@@ -201,6 +201,32 @@ class AccountAndSharingTests(_Fixture):
             )
         self.assertEqual(locked.status_code, 400)
 
+    def test_admin_reset_needs_no_email_and_only_resets_the_admin(self):
+        sent = []
+        with mock.patch.dict(os.environ, {"DEFAULT_ADMIN_EMAIL": "admin@test.com"}),                 mock.patch("services.email_service.is_configured", return_value=True),                 mock.patch("services.email_service.send_code_email", side_effect=lambda e, c, p, m: sent.append((e, c))):
+            # The client page never sends a code for an admin account.
+            self.client.post("/api/auth/password/forgot", json={"email": "admin@test.com"})
+            self.assertEqual(sent, [])
+
+            requested = self.client.post("/api/auth/password/admin-forgot")
+            self.assertEqual(requested.status_code, 200, requested.text)
+            self.assertIn("a•••n@test.com", requested.json()["message"])
+            self.assertEqual(sent[0][0], "admin@test.com")
+            code = sent[0][1]
+
+            # An admin code can't be used through the client reset.
+            wrong_page = self.client.post("/api/auth/password/reset",
+                                          json={"email": "admin@test.com", "code": code, "new_password": "new-admin-pass"})
+            self.assertEqual(wrong_page.status_code, 400)
+            reset = self.client.post("/api/auth/password/admin-reset", json={"code": code, "new_password": "new-admin-pass"})
+            self.assertEqual(reset.status_code, 200, reset.text)
+        self.login("admin@test.com", "new-admin-pass")
+        self.login("alice@test.com", "alice-pass-1")  # clients untouched
+
+    def test_admin_reset_unavailable_without_configured_admin(self):
+        with mock.patch.dict(os.environ, {"DEFAULT_ADMIN_EMAIL": "alice@test.com"}),                 mock.patch("services.email_service.is_configured", return_value=True):
+            self.assertEqual(self.client.post("/api/auth/password/admin-forgot").status_code, 503)
+
     # ── Signup verification ────────────────────────────────────────────
     def test_signup_requires_code_when_email_configured(self):
         sent = {}
