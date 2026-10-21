@@ -75,7 +75,7 @@ function buildValueScales(activeSeries) {
 }
 
 
-export default function RunAnalysisGraph({ api, token, attempt, athleteName, onClose }) {
+export default function RunAnalysisGraph({ api, token, attempt, athleteName, onClose, endpoint, audience = "admin" }) {
   const [timeline, setTimeline] = useState(null);
   const [error, setError] = useState("");
   const [mode, setMode] = useState("score");
@@ -86,7 +86,7 @@ export default function RunAnalysisGraph({ api, token, attempt, athleteName, onC
     let active = true;
     setTimeline(null);
     setError("");
-    api(`/admin/attempts/${attempt.id}/timeline?resolution=second`, { token })
+    api(endpoint || `/admin/attempts/${attempt.id}/timeline?resolution=second`, { token })
       .then((payload) => {
         if (active) setTimeline(payload);
       })
@@ -219,8 +219,8 @@ export default function RunAnalysisGraph({ api, token, attempt, athleteName, onC
       <section className="run-graph-dialog" role="dialog" aria-modal="true" aria-labelledby="run-graph-title">
         <header className="run-graph-header">
           <div>
-            <p className="eyebrow">Run {attempt.attempt_number || attempt.id} analysis</p>
-            <h2 id="run-graph-title">{athleteName || "Athlete"} metric timeline</h2>
+            <p className="eyebrow">Run {attempt.run_number || attempt.attempt_number || attempt.id} analysis</p>
+            <h2 id="run-graph-title">{audience === "client" ? "Your run, second by second" : `${athleteName || "Athlete"} metric timeline`}</h2>
             <p>Compare each scored component through the run.</p>
           </div>
           <button className="run-graph-close" type="button" onClick={onClose} aria-label="Close metric timeline">x</button>

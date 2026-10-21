@@ -1,4 +1,4 @@
-from typing import List, Optional
+from typing import List, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import or_
@@ -8,6 +8,8 @@ from database import get_db
 from models.person import Person
 from models.video_analysis import VideoAnalysis
 from schemas.video_analysis import ClientAttemptOut
+from schemas.analysis_timeline import AnalysisTimelineOut
+from schemas.analysis_timeline import AnalysisTimelineOut
 from schemas.personal_best import PersonalBestsResponse
 from services.auth import get_current_user
 from services.aws_s3 import S3Manager
@@ -77,6 +79,54 @@ def my_attempt_detail(
             attempt.report_path = S3Manager.get_report_url(attempt.s3_report_key, expiration=86400)
     enrich_attempts(db, [attempt], client_numbering=True)
     return attempt
+
+
+@router.get("/attempts/{attempt_id}/timeline", response_model=AnalysisTimelineOut)
+def my_attempt_timeline(
+    attempt_id: int,
+    resolution: Literal["second", "frame"] = "second",
+    current_user: Person = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Run graph data for one of the athlete's own (non-archived) runs."""
+    from routes.admin_portal import timeline_response
+
+    attempt = (
+        db.query(VideoAnalysis)
+        .filter(
+            VideoAnalysis.id == attempt_id,
+            VideoAnalysis.person_id == current_user.id,
+            or_(VideoAnalysis.is_archived.is_(False), VideoAnalysis.is_archived.is_(None)),
+        )
+        .first()
+    )
+    if not attempt:
+        raise HTTPException(status_code=404, detail="Attempt not found")
+    return timeline_response(db, attempt, resolution)
+
+
+@router.get("/attempts/{attempt_id}/timeline", response_model=AnalysisTimelineOut)
+def my_attempt_timeline(
+    attempt_id: int,
+    resolution: Literal["second", "frame"] = "second",
+    current_user: Person = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Run graph data for one of the athlete's own (non-archived) runs."""
+    from routes.admin_portal import timeline_response
+
+    attempt = (
+        db.query(VideoAnalysis)
+        .filter(
+            VideoAnalysis.id == attempt_id,
+            VideoAnalysis.person_id == current_user.id,
+            or_(VideoAnalysis.is_archived.is_(False), VideoAnalysis.is_archived.is_(None)),
+        )
+        .first()
+    )
+    if not attempt:
+        raise HTTPException(status_code=404, detail="Attempt not found")
+    return timeline_response(db, attempt, resolution)
 
 
 @router.get("/personal-bests", response_model=PersonalBestsResponse)

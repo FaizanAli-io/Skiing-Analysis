@@ -3013,6 +3013,7 @@ function ClientDashboard() {
   const [user, setUser] = useState(null);
   const [personalBests, setPersonalBests] = useState({});
   const [error, setError] = useState("");
+  const [graphAttempt, setGraphAttempt] = useState(null);
 
   async function loadHistory() {
     const [history, bests] = await Promise.all([
@@ -3089,6 +3090,7 @@ function ClientDashboard() {
               key={attempt.id}
               attempt={attempt}
               clientName={attempt.person_name || attempt.client_name || user?.name}
+              onViewAnalysis={setGraphAttempt}
             />
           )) : <EmptyState text="No attempts have been uploaded yet." />}
         </div>
@@ -3100,6 +3102,17 @@ function ClientDashboard() {
           </div>
         )}
       </section>
+      {graphAttempt && (
+        <RunAnalysisGraph
+          api={api}
+          token={token}
+          attempt={graphAttempt}
+          athleteName={user?.name}
+          audience="client"
+          endpoint={`/me/attempts/${graphAttempt.id}/timeline?resolution=second`}
+          onClose={() => setGraphAttempt(null)}
+        />
+      )}
     </main>
   );
 }

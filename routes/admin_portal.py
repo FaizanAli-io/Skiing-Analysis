@@ -323,7 +323,12 @@ def admin_attempt_timeline(
     )
     if analysis is None:
         raise HTTPException(status_code=404, detail="Analysis not found")
+    return timeline_response(db, analysis, resolution)
 
+
+def timeline_response(db: Session, analysis: VideoAnalysis, resolution: str = "second") -> AnalysisTimelineOut:
+    """Graph data for one run (shared by the admin and client portals)."""
+    analysis_id = analysis.id
     timeline = (
         db.query(AnalysisTimeline)
         .filter(AnalysisTimeline.video_analysis_id == analysis_id)

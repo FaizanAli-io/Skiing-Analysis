@@ -553,3 +553,52 @@ class StagedPreviewTests(_Fixture):
         self.assertEqual(self.client.post("/api/analyze-staged/", headers=self.admin,
                                           json={"staging_id": "../../etc", "user_id": self.ids["alice"]}).status_code, 404)
         self.assertEqual(self.client.post("/api/uploads/stage", files={"file": ("a.mov", b"x", "video/quicktime")}).status_code, 401)
+
+
+class ClientGraphTests(_Fixture):
+    def setUp(self):
+        super().setUp()
+        from models.analysis_timeline import AnalysisTimeline
+        from routes import auth as auth_routes, client_portal
+        from services.analysis_timeline import TIMELINE_PARAMETER_CONFIG
+
+        app = FastAPI()
+        app.include_router(client_portal.router, prefix="/api")
+        app.include_router(auth_routes.router, prefix="/api")
+        app.dependency_overrides[database.get_db] = override_get_db
+        self.client = TestClient(app)
+        db = TestingSession()
+        db.add(AnalysisTimeline(
+            video_analysis_id=self.ids["run"], sample_rate_hz=10.0, scoring_version="test",
+            parameter_config=TIMELINE_PARAMETER_CONFIG,
+            samples=[{"time_seconds": 0.1, "pillars": {}}, {"time_seconds": 0.2, "pillars": {}}],
+        ))
+        db.commit()
+        db.close()
+
+    def headers(self, email, password):
+        token = self.client.post("/api/auth/login", json={"email": email, "password": password}).json()["access_token"]
+        return {"Authorization": f"Bearer {token}"}
+
+    def test_client_sees_own_run_graph_only(self):
+        url = f"/api/me/attempts/{self.ids['run']}/timeline?resolution=second"
+        alice = self.client.get(url, headers=self.headers("alice@test.com", "alice-pass-1"))
+        self.assertEqual(alice.status_code, 200, alice.text)
+        self.assertEqual(alice.json()["parameter_config"]["edging"]["label"], "Parallelism")
+        bob = self.client.get(url, headers=self.headers("bob@test.com", "bob-pass-1"))
+        self.assertEqual(bob.status_code, 404)
+        self.assertEqual(self.client.get(url).status_code, 401)
+
+    def test_archived_or_missing_graph_is_refused(self):
+        alice = self.headers("alice@test.com", "alice-pass-1")
+        db = TestingSession()
+        db.query(VideoAnalysis).filter(VideoAnalysis.id == self.ids["run"]).update({"is_archived": True})
+        db.add(VideoAnalysis(person_id=self.ids["alice"], attempt_number=2, video_name="old.mp4",
+                             pressure_score=100, balance_score=100, rotation_score=100, edging_score=100, status="completed"))
+        db.commit()
+        old_run = db.query(VideoAnalysis).filter(VideoAnalysis.video_name == "old.mp4").first().id
+        db.close()
+        self.assertEqual(self.client.get(f"/api/me/attempts/{self.ids['run']}/timeline", headers=alice).status_code, 404)
+        no_data = self.client.get(f"/api/me/attempts/{old_run}/timeline", headers=alice)
+        self.assertEqual(no_data.status_code, 404)
+        self.assertIn("unavailable", no_data.json()["detail"])
